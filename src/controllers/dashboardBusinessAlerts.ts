@@ -18,6 +18,7 @@ import {
   quantityMinStockLowStockFilter,
   resolveProductLowStockMin,
 } from '../utils/lowStockMongo.js';
+import { countLowStockItems } from '../utils/lowStockCount.js';
 import { formatTimingLegs, timeNamed } from '../utils/timing.js';
 
 type Priority = 'critical' | 'warning' | 'info';
@@ -170,7 +171,6 @@ type StockSource = {
   qtyField: 'stock' | 'quantity';
   minField: 'minStock' | 'threshold' | 'reorderLevel';
   find: () => Promise<unknown[]>;
-  count: () => Promise<number>;
 };
 
 async function loadLowStock(tenantId: string, legs: Legs) {
@@ -183,7 +183,6 @@ async function loadLowStock(tenantId: string, legs: Legs) {
       qtyField: 'stock',
       minField: 'minStock',
       find: () => Product.find({ tenantId, ...productLowStockFilter() }).select(projection).limit(ITEM_CAP).lean(),
-      count: () => Product.countDocuments({ tenantId, ...productLowStockFilter() }),
     },
     {
       typeLabel: 'Raw Material',
@@ -191,7 +190,6 @@ async function loadLowStock(tenantId: string, legs: Legs) {
       qtyField: 'quantity',
       minField: 'threshold',
       find: () => RawMaterial.find({ tenantId, ...rawMaterialLowStockFilter() }).select(projection).limit(ITEM_CAP).lean(),
-      count: () => RawMaterial.countDocuments({ tenantId, ...rawMaterialLowStockFilter() }),
     },
     {
       typeLabel: 'Semi Finished',
@@ -199,7 +197,6 @@ async function loadLowStock(tenantId: string, legs: Legs) {
       qtyField: 'quantity',
       minField: 'minStock',
       find: () => SemiFinishedProduct.find({ tenantId, ...quantityMinStockLowStockFilter() }).select(projection).limit(ITEM_CAP).lean(),
-      count: () => SemiFinishedProduct.countDocuments({ tenantId, ...quantityMinStockLowStockFilter() }),
     },
     {
       typeLabel: 'Finished Goods',
@@ -207,20 +204,17 @@ async function loadLowStock(tenantId: string, legs: Legs) {
       qtyField: 'quantity',
       minField: 'minStock',
       find: () => FinishedGood.find({ tenantId, ...quantityMinStockLowStockFilter() }).select(projection).limit(ITEM_CAP).lean(),
-      count: () => FinishedGood.countDocuments({ tenantId, ...quantityMinStockLowStockFilter() }),
     },
   ];
 
-  const counts = await Promise.all(
-    sources.map((source, i) => timeNamed(`lowStockCount${i}`, source.count, legs)),
-  );
-  const docs = await Promise.all(
-    sources.map((source, i) => timeNamed(`lowStockItems${i}`, source.find, legs)),
-  );
+  const [count, ...docSets] = await Promise.all([
+    timeNamed('lowStockCount', () => countLowStockItems({ tenantId }, legs), legs),
+    ...sources.map((source, i) => timeNamed(`lowStockItems${i}`, source.find, legs)),
+  ]);
 
   const items: AlertItem[] = [];
   sources.forEach((source, i) => {
-    for (const raw of docs[i] as Array<Record<string, unknown>>) {
+    for (const raw of docSets[i] as Array<Record<string, unknown>>) {
       const qty = Number(raw[source.qtyField] ?? 0);
       const min = source.typeLabel === 'Product'
         ? resolveProductLowStockMin(raw)
@@ -249,7 +243,7 @@ async function loadLowStock(tenantId: string, legs: Legs) {
   });
 
   items.sort((a, b) => b.sortKey - a.sortKey);
-  return { count: counts.reduce((sum, n) => sum + n, 0), items: items.slice(0, ITEM_CAP) };
+  return { count, items: items.slice(0, ITEM_CAP) };
 }
 
 async function loadPendingPurchases(tenantId: string, legs: Legs) {

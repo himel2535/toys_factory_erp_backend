@@ -13,11 +13,7 @@ import {
 import { PurchaseOrder, ProductionOrder } from '../models/extendedResources.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { sendSuccess } from '../utils/apiResponse.js';
-import {
-  productLowStockFilter,
-  rawMaterialLowStockFilter,
-  quantityMinStockLowStockFilter,
-} from '../utils/lowStockMongo.js';
+import { countLowStockItems } from '../utils/lowStockCount.js';
 import { currentMonthPrefix, invoiceMonthMatch } from '../utils/monthPrefix.js';
 import { formatTimingLegs, timeNamed } from '../utils/timing.js';
 
@@ -56,6 +52,7 @@ async function loadKpiSummary(tenantId: string, filter: Filter, monthPrefix: str
     customerDue,
     productionPending,
     productionPendingQty,
+    lowStock,
   ] = await Promise.all([
     timeNamed('monthInvoices', () => Invoice.aggregate([
       { $match: invoiceMonthMatch(tenantId, monthPrefix) },
@@ -99,6 +96,7 @@ async function loadKpiSummary(tenantId: string, filter: Filter, monthPrefix: str
       { $match: { ...filter, status: { $in: ['Planned', 'In Progress'] } } },
       { $group: { _id: null, qty: { $sum: { $ifNull: ['$plannedQuantity', 0] } } } },
     ]), legs),
+    timeNamed('lowStock', () => countLowStockItems(filter, legs), legs),
   ]);
 
   return {
@@ -111,6 +109,7 @@ async function loadKpiSummary(tenantId: string, filter: Filter, monthPrefix: str
     customerDueCount: customerDue[0]?.withDue ?? 0,
     pendingProduction: productionPending,
     pendingProductionQty: productionPendingQty[0]?.qty ?? 0,
+    lowStock,
   };
 }
 
@@ -121,10 +120,6 @@ async function loadExtraSummary(filter: Filter, legs: Legs) {
     productionCompleted,
     purchaseSummary,
     purchasePending,
-    lowStockProducts,
-    lowStockRm,
-    lowStockSf,
-    lowStockFg,
     inventoryValue,
   ] = await Promise.all([
     timeNamed('salesAgg', () => SalesOrder.aggregate([
@@ -157,10 +152,6 @@ async function loadExtraSummary(filter: Filter, legs: Legs) {
       ...filter,
       status: { $in: ['Draft', 'Sent'] },
     }), legs),
-    timeNamed('lowStockProducts', () => Product.countDocuments({ ...filter, ...productLowStockFilter() }), legs),
-    timeNamed('lowStockRm', () => RawMaterial.countDocuments({ ...filter, ...rawMaterialLowStockFilter() }), legs),
-    timeNamed('lowStockSf', () => SemiFinishedProduct.countDocuments({ ...filter, ...quantityMinStockLowStockFilter() }), legs),
-    timeNamed('lowStockFg', () => FinishedGood.countDocuments({ ...filter, ...quantityMinStockLowStockFilter() }), legs),
     timeNamed('inventoryValue', () => Promise.all([
       RawMaterial.aggregate(inventoryValuePipeline(filter, 'quantity', ['cost', 'price', 'supplierPrice'])),
       SemiFinishedProduct.aggregate(inventoryValuePipeline(filter, 'quantity', ['avgCost', 'cost'])),
@@ -186,7 +177,6 @@ async function loadExtraSummary(filter: Filter, legs: Legs) {
     productionCompleted: productionCompleted[0]?.count ?? 0,
     productionQty: productionCompleted[0]?.qty ?? 0,
     pendingPurchase: purchasePending,
-    lowStock: lowStockProducts + lowStockRm + lowStockSf + lowStockFg,
     rmStockValue: rmVal,
     sfStockValue: sfVal,
     fgStockValue: fgVal,
