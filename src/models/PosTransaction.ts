@@ -23,6 +23,8 @@ const posTransactionSchema = new Schema(
 );
 
 posTransactionSchema.index({ tenantId: 1, legacyId: 1 }, { unique: true, sparse: true });
+posTransactionSchema.index({ tenantId: 1, date: -1 });
+posTransactionSchema.index({ tenantId: 1, status: 1, date: -1 });
 
 export type PosTransactionDocument = InferSchemaType<typeof posTransactionSchema> & { _id: mongoose.Types.ObjectId };
 

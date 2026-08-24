@@ -11,6 +11,11 @@ type CacheEntry = {
 
 type CacheKeyFn = (req: Request) => string;
 
+type InflightHandle = {
+  promise: Promise<CacheEntry>;
+  abort: (reason?: Error) => void;
+};
+
 const store = new Map<string, CacheEntry>();
 const REDIS_KEY_PREFIX = 'erp:cache:';
 
@@ -70,12 +75,80 @@ export function dashboardBusinessAlertsCacheKey(req: Request): string {
   return `tenant:${tenantId}:/api/v1/dashboard/business-alerts?tenantId=${encodeURIComponent(tenantId)}`;
 }
 
+export function dashboardRecentInvoicesCacheKey(req: Request): string {
+  const tenantId = String(req.query.tenantId ?? 'default');
+  const limit = String(req.query.limit ?? '5');
+  return `tenant:${tenantId}:/api/v1/dashboard/recent-invoices?limit=${encodeURIComponent(limit)}&tenantId=${encodeURIComponent(tenantId)}`;
+}
+
+export function dashboardSalesTrendCacheKey(req: Request): string {
+  const tenantId = String(req.query.tenantId ?? 'default');
+  const range = String(req.query.range ?? 'month').toLowerCase();
+  return `tenant:${tenantId}:/api/v1/dashboard/sales-trend?range=${encodeURIComponent(range)}&tenantId=${encodeURIComponent(tenantId)}`;
+}
+
+export function dashboardRevenueTrendCacheKey(req: Request): string {
+  const tenantId = String(req.query.tenantId ?? 'default');
+  const range = String(req.query.range ?? 'month').toLowerCase();
+  return `tenant:${tenantId}:/api/v1/dashboard/revenue-trend?range=${encodeURIComponent(range)}&tenantId=${encodeURIComponent(tenantId)}`;
+}
+
+function createInflightWaiter(key: string): InflightHandle {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let settled = false;
+  let rejectFn!: (err: Error) => void;
+
+  const promise = new Promise<CacheEntry>((resolve, reject) => {
+    rejectFn = reject;
+    const start = Date.now();
+    const poll = () => {
+      if (settled) return;
+      const hit = readMemory(key);
+      if (hit) {
+        settled = true;
+        if (timer) clearTimeout(timer);
+        settleInflight(key);
+        resolve(hit);
+        return;
+      }
+      if (Date.now() - start > 30_000) {
+        settled = true;
+        if (timer) clearTimeout(timer);
+        settleInflight(key);
+        reject(new Error('cache inflight timeout'));
+        return;
+      }
+      timer = setTimeout(poll, 10);
+    };
+    poll();
+  });
+
+  promise.catch(() => undefined);
+
+  return {
+    promise,
+    abort: (reason = new Error('cache inflight aborted')) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      settleInflight(key);
+      rejectFn(reason);
+    },
+  };
+}
+
 function attachCacheWriter(
   res: Response,
   key: string,
   ttlMs: number,
-  inflightPromise?: Promise<CacheEntry>,
+  inflight?: InflightHandle,
 ) {
+  let cacheWritten = false;
+  const finalizeMiss = () => {
+    if (cacheWritten || !inflight) return;
+    inflight.abort(new Error('cache inflight aborted'));
+  };
+
   const originalJson = res.json.bind(res);
   res.json = ((payload: { success?: boolean; data?: unknown; meta?: Record<string, unknown> }) => {
     if (payload?.success !== false && payload?.data !== undefined) {
@@ -88,37 +161,16 @@ function attachCacheWriter(
       if (isRedisReady()) {
         void redisSet(redisPhysicalKey(key), JSON.stringify(entry), ttlMs);
       }
-      if (inflightPromise) settleInflight(key);
+      cacheWritten = true;
+      settleInflight(key);
+    } else if (inflight) {
+      finalizeMiss();
     }
     return originalJson(payload);
   }) as typeof res.json;
 
-  if (inflightPromise) {
-    res.on('close', () => {
-      if (inflightMisses.get(key) === inflightPromise) {
-        inflightMisses.delete(key);
-      }
-    });
-  }
-}
-
-function createInflightWaiter(key: string): Promise<CacheEntry> {
-  const start = Date.now();
-  return new Promise((resolve, reject) => {
-    const poll = () => {
-      const hit = readMemory(key);
-      if (hit) {
-        resolve(hit);
-        return;
-      }
-      if (Date.now() - start > 30_000) {
-        reject(new Error('cache inflight timeout'));
-        return;
-      }
-      setTimeout(poll, 10);
-    };
-    poll();
-  });
+  res.on('finish', finalizeMiss);
+  res.on('close', finalizeMiss);
 }
 
 /** GET cache — Redis when REDIS_URL is set, otherwise in-memory. */
@@ -171,11 +223,11 @@ export function cacheGetResponse(ttlMs: number, keyFn: CacheKeyFn = buildTenantC
 
     if (res.headersSent) return;
 
-    const inflightPromise = createInflightWaiter(key);
-    inflightMisses.set(key, inflightPromise);
+    const inflight = createInflightWaiter(key);
+    inflightMisses.set(key, inflight.promise);
 
     console.log(`[cache] MISS ${req.method} ${key}`);
-    attachCacheWriter(res, key, ttlMs, inflightPromise);
+    attachCacheWriter(res, key, ttlMs, inflight);
     next();
   };
 }

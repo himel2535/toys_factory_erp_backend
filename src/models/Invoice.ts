@@ -31,6 +31,8 @@ invoiceSchema.index({ tenantId: 1, legacyId: 1 }, { unique: true, sparse: true }
 invoiceSchema.index({ tenantId: 1, issueDate: -1, date: -1 });
 invoiceSchema.index({ tenantId: 1, status: 1, createdAt: -1 });
 invoiceSchema.index({ tenantId: 1, customerId: 1, issueDate: -1 });
+invoiceSchema.index({ tenantId: 1, dueDate: 1, status: 1 });
+invoiceSchema.index({ tenantId: 1, status: 1, issueDate: -1, date: -1 });
 
 export async function syncCustomerDue(customerId: string | undefined | null, tenantId: string) {
   if (!customerId) return;

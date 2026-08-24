@@ -12,11 +12,16 @@ import { notFound, badRequest } from '../utils/ApiError.js';
 import { sendSuccess } from '../utils/apiResponse.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { clearResponseCache } from '../middleware/responseCache.js';
+import { invalidateDashboardDataLoader } from '../services/dashboardDataLoader.js';
 
 function clearInventoryCaches() {
+  invalidateDashboardDataLoader('default');
   clearResponseCache('/api/v1/dashboard/summary');
   clearResponseCache('/api/v1/dashboard/top-products');
   clearResponseCache('/api/v1/dashboard/business-alerts');
+  clearResponseCache('/api/v1/dashboard/recent-invoices');
+  clearResponseCache('/api/v1/dashboard/sales-trend');
+  clearResponseCache('/api/v1/dashboard/revenue-trend');
   clearResponseCache('/api/v1/reports/');
   for (const prefix of [
     '/api/v1/products',

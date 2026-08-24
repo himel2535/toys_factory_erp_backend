@@ -1,4 +1,5 @@
 import type { Request, Response } from 'express';
+import type { Model } from 'mongoose';
 import {
   Customer,
   Invoice,
@@ -18,7 +19,7 @@ import {
   quantityMinStockLowStockFilter,
   resolveProductLowStockMin,
 } from '../utils/lowStockMongo.js';
-import { countLowStockItems } from '../utils/lowStockCount.js';
+import { facetCountAndFind, findLowStockPreview } from '../utils/facetQuery.js';
 import { formatTimingLegs, timeNamed } from '../utils/timing.js';
 
 type Priority = 'critical' | 'warning' | 'info';
@@ -91,12 +92,17 @@ async function loadCustomerDue(tenantId: string, legs: Legs) {
     tenantId,
     $or: [{ totalDue: { $gt: 0 } }, { due: { $gt: 0 } }],
   };
-  const [count, docs] = await Promise.all([
-    timeNamed('customerDueCount', () => Customer.countDocuments(filter), legs),
-    timeNamed('customerDueItems', () =>
-      Customer.find(filter).select('legacyId name company totalDue due status').limit(ITEM_CAP).lean(),
-      legs),
-  ]);
+  const { count, docs } = await timeNamed(
+    'customerDue',
+    () =>
+      facetCountAndFind(
+        Customer,
+        filter,
+        ITEM_CAP,
+        'legacyId name company totalDue due status',
+      ),
+    legs,
+  );
   const items: AlertItem[] = (docs as Array<Record<string, unknown>>).map((doc) => {
     const due = dueValue(doc);
     const overdue = String(doc.status ?? '').toLowerCase() === 'overdue';
@@ -130,12 +136,17 @@ async function loadLeadFollowups(tenantId: string, legs: Legs) {
     nextFollowUpAt: { $exists: true, $nin: [null, ''] },
     status: { $nin: OPEN_LEAD_STATUSES },
   };
-  const [count, docs] = await Promise.all([
-    timeNamed('leadFollowupCount', () => Lead.countDocuments(filter), legs),
-    timeNamed('leadFollowupItems', () =>
-      Lead.find(filter).select('legacyId name company status expectedValue nextFollowUpAt updatedAt createdAt').limit(ITEM_CAP).lean(),
-      legs),
-  ]);
+  const { count, docs } = await timeNamed(
+    'leadFollowup',
+    () =>
+      facetCountAndFind(
+        Lead,
+        filter,
+        ITEM_CAP,
+        'legacyId name company status expectedValue nextFollowUpAt updatedAt createdAt',
+      ),
+    legs,
+  );
   const today = todayIso();
   const items: AlertItem[] = (docs as Array<Record<string, unknown>>).map((doc) => {
     const followUp = String(doc.nextFollowUpAt ?? '').slice(0, 10);
@@ -207,10 +218,33 @@ async function loadLowStock(tenantId: string, legs: Legs) {
     },
   ];
 
-  const [count, ...docSets] = await Promise.all([
-    timeNamed('lowStockCount', () => countLowStockItems({ tenantId }, legs), legs),
-    ...sources.map((source, i) => timeNamed(`lowStockItems${i}`, source.find, legs)),
+  const [productHit, rmHit, sfHit, fgHit] = await Promise.all([
+    timeNamed('lowStockProducts', () =>
+      findLowStockPreview(Product, { tenantId, ...productLowStockFilter() }, projection, ITEM_CAP),
+      legs),
+    timeNamed('lowStockRm', () =>
+      findLowStockPreview(RawMaterial, { tenantId, ...rawMaterialLowStockFilter() }, projection, ITEM_CAP),
+      legs),
+    timeNamed('lowStockSf', () =>
+      findLowStockPreview(
+        SemiFinishedProduct,
+        { tenantId, ...quantityMinStockLowStockFilter() },
+        projection,
+        ITEM_CAP,
+      ),
+      legs),
+    timeNamed('lowStockFg', () =>
+      findLowStockPreview(
+        FinishedGood,
+        { tenantId, ...quantityMinStockLowStockFilter() },
+        projection,
+        ITEM_CAP,
+      ),
+      legs),
   ]);
+
+  const docSets = [productHit.docs, rmHit.docs, sfHit.docs, fgHit.docs];
+  const count = productHit.count + rmHit.count + sfHit.count + fgHit.count;
 
   const items: AlertItem[] = [];
   sources.forEach((source, i) => {
@@ -248,12 +282,11 @@ async function loadLowStock(tenantId: string, legs: Legs) {
 
 async function loadPendingPurchases(tenantId: string, legs: Legs) {
   const filter = { tenantId, status: { $in: PENDING_PO_STATUSES } };
-  const [count, docs] = await Promise.all([
-    timeNamed('pendingPurchaseCount', () => PurchaseOrder.countDocuments(filter), legs),
-    timeNamed('pendingPurchaseItems', () =>
-      PurchaseOrder.find(filter).limit(ITEM_CAP).lean(),
-      legs),
-  ]);
+  const { count, docs } = await timeNamed(
+    'pendingPurchase',
+    () => facetCountAndFind(PurchaseOrder as Model<unknown>, filter, ITEM_CAP),
+    legs,
+  );
   const today = todayIso();
   const items: AlertItem[] = (docs as Array<Record<string, unknown>>).map((doc) => {
     const href = '/purchases/orders';
@@ -283,10 +316,11 @@ async function loadPendingPurchases(tenantId: string, legs: Legs) {
 
 async function loadProduction(tenantId: string, legs: Legs) {
   const filter = { tenantId, status: { $in: PRODUCTION_STATUSES } };
-  const [count, docs] = await Promise.all([
-    timeNamed('productionCount', () => ProductionOrder.countDocuments(filter), legs),
-    timeNamed('productionItems', () => ProductionOrder.find(filter).limit(ITEM_CAP).lean(), legs),
-  ]);
+  const { count, docs } = await timeNamed(
+    'production',
+    () => facetCountAndFind(ProductionOrder as Model<unknown>, filter, ITEM_CAP),
+    legs,
+  );
   const items: AlertItem[] = (docs as Array<Record<string, unknown>>).map((doc) => {
     const href = '/manufacturing/wastage';
     const status = String(doc.status ?? 'Planned');
@@ -319,20 +353,27 @@ async function loadPaymentsDueToday(tenantId: string, legs: Legs) {
     tenantId,
     due: { $gt: 0 },
     status: { $nin: ['paid', 'cancelled'] },
-    $or: [{ dueDate: today }, { dueDate: { $regex: `^${today}` } }],
+    dueDate: today,
   };
   const dueFilter = {
     tenantId,
     status: { $in: ['due_today', 'Due Today'] },
   };
-  const [invoiceCount, invoices, dueCount, dues] = await Promise.all([
-    timeNamed('payTodayInvCount', () => Invoice.countDocuments(invoiceFilter), legs),
-    timeNamed('payTodayInvItems', () =>
-      Invoice.find(invoiceFilter).select('legacyId customerId customerName due dueDate status').limit(ITEM_CAP).lean(),
+  const [invoiceHit, dueHit] = await Promise.all([
+    timeNamed('payTodayInvoices', () =>
+      facetCountAndFind(
+        Invoice,
+        invoiceFilter,
+        ITEM_CAP,
+        'legacyId customerId customerName due dueDate status',
+      ),
       legs),
-    timeNamed('payTodayDueCount', () => DueRecord.countDocuments(dueFilter), legs),
-    timeNamed('payTodayDueItems', () => DueRecord.find(dueFilter).limit(ITEM_CAP).lean(), legs),
+    timeNamed('payTodayDues', () => facetCountAndFind(DueRecord as Model<unknown>, dueFilter, ITEM_CAP), legs),
   ]);
+  const invoiceCount = invoiceHit.count;
+  const invoices = invoiceHit.docs;
+  const dueCount = dueHit.count;
+  const dues = dueHit.docs;
 
   const items: AlertItem[] = [];
   for (const doc of invoices as Array<Record<string, unknown>>) {
@@ -386,12 +427,13 @@ async function loadPaymentsDueToday(tenantId: string, legs: Legs) {
 async function loadSupplierDue(tenantId: string, legs: Legs) {
   const filter = {
     tenantId,
-    $expr: { $gt: [{ $ifNull: ['$due', { $ifNull: ['$balance', 0] }] }, 0] },
+    $or: [{ due: { $gt: 0 } }, { balance: { $gt: 0 } }],
   };
-  const [count, docs] = await Promise.all([
-    timeNamed('supplierDueCount', () => PurchaseOrder.countDocuments(filter), legs),
-    timeNamed('supplierDueItems', () => PurchaseOrder.find(filter).limit(ITEM_CAP).lean(), legs),
-  ]);
+  const { count, docs } = await timeNamed(
+    'supplierDue',
+    () => facetCountAndFind(PurchaseOrder as Model<unknown>, filter, ITEM_CAP),
+    legs,
+  );
   const items: AlertItem[] = (docs as Array<Record<string, unknown>>).map((doc) => {
     const due = dueValue(doc);
     const href = '/purchases/payments';

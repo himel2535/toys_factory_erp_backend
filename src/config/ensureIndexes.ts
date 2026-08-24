@@ -29,7 +29,7 @@ export async function ensureDatabaseIndexes(): Promise<void> {
     'Quotation', 'Delivery', 'Dispatch', 'Payment', 'Return', 'Complaint', 'PosTransaction',
     'Category', 'Unit', 'Warehouse', 'RawMaterial', 'SemiFinishedProduct', 'FinishedGood',
     'StockIn', 'StockOut', 'StockTransfer', 'StockAdjustment',
-    'PurchaseOrder', 'ProductionOrder', 'Project', 'Department', 'Designation', 'LeaveRequest',
+    'PurchaseOrder', 'ProductionOrder', 'DueRecord', 'Project', 'Department', 'Designation', 'LeaveRequest',
     'Attendance', 'PayrollRun', 'SalaryStructure', 'Asset', 'Recipe', 'GoodsReceived',
     'PurchaseBill', 'PurchasePayment', 'PurchaseReturn', 'Journal', 'LedgerEntry', 'CashboxEntry',
     'PmProject', 'PmTask',
@@ -39,9 +39,11 @@ export async function ensureDatabaseIndexes(): Promise<void> {
     withIndexes(name, [TENANT_STATUS, TENANT_CREATED, TENANT_LEGACY]);
   }
 
-  withIndexes('Invoice', [TENANT_DATE, TENANT_CUSTOMER, { tenantId: 1, issueDate: -1 }]);
+  withIndexes('Invoice', [TENANT_DATE, TENANT_CUSTOMER, { tenantId: 1, issueDate: -1 }, { tenantId: 1, dueDate: 1, status: 1 }]);
   withIndexes('SalesOrder', [TENANT_DATE]);
+  withIndexes('PosTransaction', [TENANT_DATE, { tenantId: 1, status: 1, date: -1 }]);
   withIndexes('Payment', [TENANT_DATE]);
+  withIndexes('DueRecord', [TENANT_STATUS]);
   withIndexes('Lead', [TENANT_FOLLOWUP]);
   withIndexes('Product', [{ tenantId: 1, stock: 1 }]);
   withIndexes('RawMaterial', [{ tenantId: 1, quantity: 1 }]);

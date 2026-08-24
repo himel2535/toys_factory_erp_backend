@@ -5,6 +5,7 @@ import { sendSuccess, sendMessage } from '../utils/apiResponse.js';
 import { asyncHandler, parsePagination, paginationMeta } from '../utils/asyncHandler.js';
 import { listFieldsFor } from '../config/listFieldProfiles.js';
 import { clearResponseCache } from '../middleware/responseCache.js';
+import { invalidateDashboardDataLoader } from '../services/dashboardDataLoader.js';
 import { posCategoryMongoFilter } from '../utils/posCategoryFilter.js';
 import { stampStockDurationOnCreate, stampStockDurationOnUpdate } from '../utils/stockDuration.js';
 import {
@@ -79,9 +80,14 @@ export function createCrudController<T extends Record<string, unknown>>(
 
   function clearCaches(req?: Request) {
     const started = Date.now();
+    const tenantId = String(req?.query?.tenantId ?? req?.body?.tenantId ?? 'default');
+    invalidateDashboardDataLoader(tenantId);
     clearResponseCache('/api/v1/dashboard/summary');
     clearResponseCache('/api/v1/dashboard/top-products');
     clearResponseCache('/api/v1/dashboard/business-alerts');
+    clearResponseCache('/api/v1/dashboard/recent-invoices');
+    clearResponseCache('/api/v1/dashboard/sales-trend');
+    clearResponseCache('/api/v1/dashboard/revenue-trend');
     clearResponseCache('/api/v1/reports/');
     if (listCachePrefix) clearResponseCache(listCachePrefix);
     if (req) markPerfLeg(req, 'cacheInvalidate', Date.now() - started);
