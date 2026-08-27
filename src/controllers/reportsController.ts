@@ -20,6 +20,7 @@ import {
 } from '../models/extendedResources.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { sendSuccess } from '../utils/apiResponse.js';
+import { getRequestTenantId } from '../utils/tenantContext.js';
 import { listFieldsFor } from '../config/listFieldProfiles.js';
 
 const REPORT_LIMIT = 300;
@@ -88,7 +89,7 @@ function mapInventoryRow(doc: Record<string, unknown>, whMap: Map<string, string
 }
 
 export const getSalesReport = asyncHandler(async (req: Request, res: Response) => {
-  const filter = tenantFilter(String(req.query.tenantId ?? 'default'));
+  const filter = tenantFilter(getRequestTenantId(req));
   const invoiceProj = selectFields('Invoice');
   const orderProj = selectFields('Sales order');
 
@@ -132,7 +133,7 @@ function mapProductSaleLine(
 
 export const getProductSalesReport = asyncHandler(async (req: Request, res: Response) => {
   const filter = {
-    ...tenantFilter(String(req.query.tenantId ?? 'default')),
+    ...tenantFilter(getRequestTenantId(req)),
     status: { $nin: ['cancelled', 'draft'] },
   };
 
@@ -158,7 +159,7 @@ export const getProductSalesReport = asyncHandler(async (req: Request, res: Resp
 });
 
 export const getPurchaseReport = asyncHandler(async (req: Request, res: Response) => {
-  const filter = tenantFilter(String(req.query.tenantId ?? 'default'));
+  const filter = tenantFilter(getRequestTenantId(req));
   const proj = selectFields('Purchase order');
   const docs = await PurchaseOrder.find(filter).select(proj).sort({ createdAt: -1 }).limit(REPORT_LIMIT).lean();
   const rows = docs.map((doc) => mapPurchaseRow(serializeDoc(doc as Record<string, unknown>)));
@@ -166,7 +167,7 @@ export const getPurchaseReport = asyncHandler(async (req: Request, res: Response
 });
 
 export const getInventoryReport = asyncHandler(async (req: Request, res: Response) => {
-  const filter = tenantFilter(String(req.query.tenantId ?? 'default'));
+  const filter = tenantFilter(getRequestTenantId(req));
   const whProj = selectFields('Warehouse');
   const warehouses = await Warehouse.find(filter).select(whProj).lean();
   const whMap = new Map(warehouses.map((w) => [String(w._id), String((w as Record<string, unknown>).name ?? w._id)]));
@@ -189,7 +190,7 @@ export const getInventoryReport = asyncHandler(async (req: Request, res: Respons
 });
 
 export const getCustomerReport = asyncHandler(async (req: Request, res: Response) => {
-  const filter = tenantFilter(String(req.query.tenantId ?? 'default'));
+  const filter = tenantFilter(getRequestTenantId(req));
   const custProj = selectFields('Customer');
   const invProj = selectFields('Invoice');
 
@@ -226,7 +227,7 @@ export const getCustomerReport = asyncHandler(async (req: Request, res: Response
 });
 
 export const getSupplierReport = asyncHandler(async (req: Request, res: Response) => {
-  const filter = tenantFilter(String(req.query.tenantId ?? 'default'));
+  const filter = tenantFilter(getRequestTenantId(req));
   const supProj = selectFields('Supplier');
   const poProj = selectFields('Purchase order');
 
@@ -262,7 +263,7 @@ export const getSupplierReport = asyncHandler(async (req: Request, res: Response
 });
 
 export const getFinancialReport = asyncHandler(async (req: Request, res: Response) => {
-  const filter = tenantFilter(String(req.query.tenantId ?? 'default'));
+  const filter = tenantFilter(getRequestTenantId(req));
   const journalProj = selectFields('Journal');
   const ledgerProj = selectFields('Ledger entry');
 
@@ -304,7 +305,7 @@ export const getFinancialReport = asyncHandler(async (req: Request, res: Respons
 });
 
 export const getHrReport = asyncHandler(async (req: Request, res: Response) => {
-  const filter = tenantFilter(String(req.query.tenantId ?? 'default'));
+  const filter = tenantFilter(getRequestTenantId(req));
   const empProj = selectFields('Employee');
   const deptProj = selectFields('Department');
   const leaveProj = selectFields('Leave request');

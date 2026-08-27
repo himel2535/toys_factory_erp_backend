@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken';
 import { User } from '../models/User.js';
 import { requireAuth } from '../middleware/requireAuth.js';
 import { ApiError } from '../utils/ApiError.js';
+import { normalizeTenantId } from '../utils/tenantContext.js';
 
 export const authRouter = Router();
 
@@ -59,7 +60,7 @@ authRouter.post('/login', async (req, res, next) => {
 
     const secret = process.env.JWT_SECRET || 'fallback-secret-for-dev';
     const token = jwt.sign(
-      { userId: user._id.toString(), role: user.role, tenantId: user.tenantId },
+      { userId: user._id.toString(), role: user.role, tenantId: normalizeTenantId((user as { tenantId?: string }).tenantId) },
       secret,
       { expiresIn: '7d' }
     );

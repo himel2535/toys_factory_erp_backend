@@ -2,6 +2,11 @@ import type { Request } from 'express';
 import jwt from 'jsonwebtoken';
 import { User } from '../models/User.js';
 import { getCachedAuthUser, setCachedAuthUser } from './authUserCache.js';
+import { attachAuthUserTenant } from './resolveTenant.js';
+import {
+  normalizeAllowedPermissions,
+  normalizeAllowedSections,
+} from '../config/sectionAccess.js';
 
 export type AuthUser = {
   _id: unknown;
@@ -10,6 +15,8 @@ export type AuthUser = {
   tenantId?: string;
   email?: string;
   name?: string;
+  allowedSections?: string[];
+  allowedPermissions?: string[];
 };
 
 function parseCookieValue(cookieHeader: string | undefined, name: string): string | undefined {
@@ -48,6 +55,13 @@ export function extractAccessTokenFromHandshake(handshake: {
   return parseCookieValue(handshake.headers.cookie, 'token');
 }
 
+function attachAuthUserFields(raw: AuthUser, jwtTenantId?: string): AuthUser {
+  const authUser = attachAuthUserTenant(raw, jwtTenantId);
+  authUser.allowedSections = normalizeAllowedSections(authUser.allowedSections);
+  authUser.allowedPermissions = normalizeAllowedPermissions(authUser.allowedPermissions);
+  return authUser;
+}
+
 export async function authenticateAccessToken(token: string): Promise<AuthUser> {
   const secret = process.env.JWT_SECRET || 'fallback-secret-for-dev';
   const decoded = jwt.verify(token, secret) as { userId: string; tenantId?: string };
@@ -57,10 +71,7 @@ export async function authenticateAccessToken(token: string): Promise<AuthUser> 
     if (cached.status === 'disabled') {
       throw new Error('Unauthorized: User not found or disabled');
     }
-    const authUser = { ...cached } as AuthUser;
-    if (!authUser.tenantId && decoded.tenantId) {
-      authUser.tenantId = decoded.tenantId;
-    }
+    const authUser = attachAuthUserFields({ ...cached } as AuthUser, decoded.tenantId);
     if (process.env.AUTH_USER_CACHE_DEBUG === '1') {
       console.log(`[auth-user-cache] hit ${decoded.userId}`);
     }
@@ -71,10 +82,7 @@ export async function authenticateAccessToken(token: string): Promise<AuthUser> 
   if (!user || (user as { status?: string }).status === 'disabled') {
     throw new Error('Unauthorized: User not found or disabled');
   }
-  const authUser = user as AuthUser;
-  if (!authUser.tenantId && decoded.tenantId) {
-    authUser.tenantId = decoded.tenantId;
-  }
+  const authUser = attachAuthUserFields(user as AuthUser, decoded.tenantId);
   setCachedAuthUser(decoded.userId, authUser);
   if (process.env.AUTH_USER_CACHE_DEBUG === '1') {
     console.log(`[auth-user-cache] miss ${decoded.userId}`);

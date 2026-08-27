@@ -1,6 +1,8 @@
-/** Local calendar YYYY-MM. */
+import { getBusinessMonthPrefix } from './businessDate.js';
+
+/** Business calendar YYYY-MM (Asia/Dhaka). */
 export function currentMonthPrefix(now = new Date()): string {
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  return getBusinessMonthPrefix(now);
 }
 
 /** Inclusive prefix range for YYYY-MM or YYYY-MM-DD string dates (index-friendly vs $regex). */

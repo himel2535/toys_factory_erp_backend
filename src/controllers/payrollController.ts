@@ -3,13 +3,14 @@ import { Employee } from '../models/index.js';
 import { SalarySheetEntry } from '../models/extendedResources.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { sendSuccess } from '../utils/apiResponse.js';
+import { getRequestTenantId } from '../utils/tenantContext.js';
 
 function tenantFilter(tenantId: string) {
   return { tenantId };
 }
 
 export const getSalarySheetSummary = asyncHandler(async (req: Request, res: Response) => {
-  const tenantId = String(req.query.tenantId ?? 'default');
+  const tenantId = getRequestTenantId(req);
   const filter: Record<string, unknown> = tenantFilter(tenantId);
   const period = String(req.query.period ?? '').trim();
   if (period) filter.period = period;

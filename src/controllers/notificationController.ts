@@ -2,6 +2,7 @@ import type { Request, Response } from 'express';
 import { InboxNotification } from '../models/InboxNotification.js';
 import { sendSuccess } from '../utils/apiResponse.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
+import { getRequestTenantId } from '../utils/tenantContext.js';
 
 function serializeNotification(doc: Record<string, unknown>) {
   const id = String(doc._id ?? doc.id ?? '');
@@ -20,7 +21,7 @@ function serializeNotification(doc: Record<string, unknown>) {
 export const listNotifications = asyncHandler(async (req: Request, res: Response) => {
   const user = (req as Request & { user?: { _id?: unknown; tenantId?: string } }).user;
   const userId = String(user?._id ?? '');
-  const tenantId = String(user?.tenantId ?? 'default');
+  const tenantId = getRequestTenantId(req);
 
   const items = await InboxNotification.find({
     tenantId,

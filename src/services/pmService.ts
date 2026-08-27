@@ -4,13 +4,10 @@ import { PmTask } from '../models/PmTask.js';
 import { User } from '../models/User.js';
 import { createAndEmitNotification } from './notify.js';
 
+import { toBusinessDateKey } from '../utils/businessDate.js';
+
 export function isoDateOnly(value: Date | string = new Date()): string {
-  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value)) {
-    return value.slice(0, 10);
-  }
-  const date = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(date.getTime())) return '';
-  return date.toISOString().slice(0, 10);
+  return toBusinessDateKey(value);
 }
 
 export function isPmTaskOverdue(

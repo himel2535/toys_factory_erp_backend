@@ -1,5 +1,5 @@
 import mongoose, { Schema, type InferSchemaType } from 'mongoose';
-import { timestampsConfig } from './shared.js';
+import { tenantField, timestampsConfig } from './shared.js';
 import bcrypt from 'bcrypt';
 import { invalidateAuthUserCache } from '../middleware/authUserCache.js';
 
@@ -21,6 +21,7 @@ const userSchema = new Schema(
       required: true,
       trim: true,
     },
+    tenantId: tenantField,
     role: {
       type: String,
       enum: ['admin', 'user'],

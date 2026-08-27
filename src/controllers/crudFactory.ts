@@ -13,6 +13,7 @@ import {
   scheduleReplacedCloudinaryDeletes,
 } from '../utils/cloudinary.js';
 import { markPerfLeg, timePerfLeg } from '../middleware/perfTrace.js';
+import { getRequestTenantId } from '../utils/tenantContext.js';
 
 type SearchFields = string[];
 
@@ -80,7 +81,7 @@ export function createCrudController<T extends Record<string, unknown>>(
 
   function clearCaches(req?: Request) {
     const started = Date.now();
-    const tenantId = String(req?.query?.tenantId ?? req?.body?.tenantId ?? 'default');
+    const tenantId = req ? getRequestTenantId(req) : 'default';
     invalidateDashboardDataLoader(tenantId);
     clearResponseCache('/api/v1/dashboard/summary');
     clearResponseCache('/api/v1/dashboard/top-products');
@@ -93,14 +94,16 @@ export function createCrudController<T extends Record<string, unknown>>(
     if (req) markPerfLeg(req, 'cacheInvalidate', Date.now() - started);
   }
 
-  function preparePayload(body: Record<string, unknown>, forCreate: boolean): Record<string, unknown> {
-    const payload: Record<string, unknown> = { tenantId: 'default', ...body };
+  function preparePayload(body: Record<string, unknown>, forCreate: boolean, tenantId: string): Record<string, unknown> {
+    const payload: Record<string, unknown> = { ...body };
+    delete payload.tenantId;
 
     for (const key of ['id', '_id', '_mongoId', 'legacyId', 'sku', 'employeeCode', 'ticketNo', 'receiptNo', 'code']) {
       if (key in payload && isEmpty(payload[key])) delete payload[key];
     }
 
     if (forCreate) {
+      payload.tenantId = tenantId;
       const clientLegacyId = payload.legacyId ?? body.id ?? body.legacyId;
       delete payload.id;
       delete payload._id;
@@ -130,19 +133,19 @@ export function createCrudController<T extends Record<string, unknown>>(
     return payload;
   }
 
-  async function createDocument(body: Record<string, unknown>) {
+  async function createDocument(body: Record<string, unknown>, tenantId: string) {
     try {
-      return await model.create(preparePayload(body, true));
+      return await model.create(preparePayload(body, true, tenantId));
     } catch (err) {
       const code = (err as { code?: number }).code;
       if (code !== 11000) throw err;
-      return await model.create(preparePayload(body, true));
+      return await model.create(preparePayload(body, true, tenantId));
     }
   }
 
   const list = asyncHandler(async (req: Request, res: Response) => {
     const { page, limit, skip, search } = parsePagination(req.query);
-    const tenantId = String(req.query.tenantId ?? 'default');
+    const tenantId = getRequestTenantId(req);
     const filter: FilterQuery<T> = { tenantId } as FilterQuery<T>;
 
     const searchFilter = buildListSearchFilter(search, searchFields);
@@ -201,13 +204,15 @@ export function createCrudController<T extends Record<string, unknown>>(
   });
 
   const getById = asyncHandler(async (req: Request, res: Response) => {
-    const doc = await model.findById(req.params.id).lean();
+    const tenantId = getRequestTenantId(req);
+    const doc = await model.findOne({ _id: req.params.id, tenantId } as FilterQuery<T>).lean();
     if (!doc) throw notFound(`${resourceName} not found`);
     sendSuccess(res, serializeLeanDoc(doc as Record<string, unknown>));
   });
 
   const create = asyncHandler(async (req: Request, res: Response) => {
-    const doc = await timePerfLeg(req, 'mongo', () => createDocument(req.body as Record<string, unknown>));
+    const tenantId = getRequestTenantId(req);
+    const doc = await timePerfLeg(req, 'mongo', () => createDocument(req.body as Record<string, unknown>, tenantId));
     if (onCreated) {
       try {
         await onCreated(doc);
@@ -216,17 +221,18 @@ export function createCrudController<T extends Record<string, unknown>>(
       }
     }
     sendSuccess(res, doc.toJSON(), undefined, 201);
-    setImmediate(() => clearCaches());
+    setImmediate(() => clearCaches(req));
   });
 
   const update = asyncHandler(async (req: Request, res: Response) => {
-    const payload = preparePayload(req.body as Record<string, unknown>, false);
-    const previous = await model.findById(req.params.id).lean();
+    const tenantId = getRequestTenantId(req);
+    const payload = preparePayload(req.body as Record<string, unknown>, false, tenantId);
+    const previous = await model.findOne({ _id: req.params.id, tenantId } as FilterQuery<T>).lean();
     if (!previous) throw notFound(`${resourceName} not found`);
     if (stockDurationQtyField) {
       stampStockDurationOnUpdate(previous as Record<string, unknown>, payload, stockDurationQtyField);
     }
-    const doc = await model.findByIdAndUpdate(req.params.id, payload, {
+    const doc = await model.findOneAndUpdate({ _id: req.params.id, tenantId } as FilterQuery<T>, payload, {
       new: true,
       runValidators: true,
     }).lean();
@@ -243,11 +249,12 @@ export function createCrudController<T extends Record<string, unknown>>(
       }
     }
     sendSuccess(res, doc);
-    setImmediate(() => clearCaches());
+    setImmediate(() => clearCaches(req));
   });
 
   const remove = asyncHandler(async (req: Request, res: Response) => {
-    const doc = await model.findByIdAndDelete(req.params.id);
+    const tenantId = getRequestTenantId(req);
+    const doc = await model.findOneAndDelete({ _id: req.params.id, tenantId } as FilterQuery<T>);
     if (!doc) throw notFound(`${resourceName} not found`);
     const removed = doc.toObject() as Record<string, unknown>;
     scheduleRemovedCloudinaryDeletes(removed);
@@ -259,19 +266,20 @@ export function createCrudController<T extends Record<string, unknown>>(
       }
     }
     sendMessage(res, `${resourceName} deleted`);
-    setImmediate(() => clearCaches());
+    setImmediate(() => clearCaches(req));
   });
 
   const bulkSeed = asyncHandler(async (req: Request, res: Response) => {
+    const tenantId = getRequestTenantId(req);
     const rows = req.body;
     if (!Array.isArray(rows)) throw badRequest('Body must be an array of records');
-    const prepared = rows.map((row) => preparePayload(row as Record<string, unknown>, true));
+    const prepared = rows.map((row) => preparePayload(row as Record<string, unknown>, true, tenantId));
     const inserted = await model.insertMany(prepared, { ordered: false }).catch((err) => {
       if (err?.insertedDocs) return err.insertedDocs;
       throw err;
     });
     sendSuccess(res, inserted, { count: inserted.length }, 201);
-    setImmediate(() => clearCaches());
+    setImmediate(() => clearCaches(req));
   });
 
   return { list, getById, create, update, remove, bulkSeed };

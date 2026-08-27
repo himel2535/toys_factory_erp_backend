@@ -2,6 +2,7 @@ import type { Request, Response, NextFunction } from 'express';
 import { sendSuccess } from '../utils/apiResponse.js';
 import { isRedisReady, redisDelByPattern, redisGet, redisSet } from '../lib/redisClient.js';
 import { markPerfLeg } from './perfTrace.js';
+import { resolvedCacheTenantId } from './resolveTenant.js';
 
 type CacheEntry = {
   body: unknown;
@@ -45,50 +46,51 @@ function settleInflight(key: string) {
 
 /** Tenant-safe logical cache key. */
 export function buildTenantCacheKey(req: Request): string {
-  const tenantId = String(req.query.tenantId ?? 'default');
+  const tenantId = resolvedCacheTenantId(req);
   const path = req.path;
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(req.query)) {
+    if (key === 'tenantId') continue;
     if (value === undefined || value === null) continue;
     params.set(key, String(value));
   }
-  if (!params.has('tenantId')) params.set('tenantId', tenantId);
+  params.set('tenantId', tenantId);
   const sorted = [...params.entries()].sort(([a], [b]) => a.localeCompare(b));
   const qs = sorted.map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
   return `tenant:${tenantId}:${path}${qs ? `?${qs}` : ''}`;
 }
 
 export function dashboardSummaryCacheKey(req: Request): string {
-  const tenantId = String(req.query.tenantId ?? 'default');
+  const tenantId = resolvedCacheTenantId(req);
   const scope = String(req.query.scope ?? 'full').toLowerCase();
   return `tenant:${tenantId}:/api/v1/dashboard/summary?scope=${encodeURIComponent(scope)}&tenantId=${encodeURIComponent(tenantId)}`;
 }
 
 export function dashboardTopProductsCacheKey(req: Request): string {
-  const tenantId = String(req.query.tenantId ?? 'default');
+  const tenantId = resolvedCacheTenantId(req);
   const limit = String(req.query.limit ?? '5');
   return `tenant:${tenantId}:/api/v1/dashboard/top-products?limit=${encodeURIComponent(limit)}&tenantId=${encodeURIComponent(tenantId)}`;
 }
 
 export function dashboardBusinessAlertsCacheKey(req: Request): string {
-  const tenantId = String(req.query.tenantId ?? 'default');
+  const tenantId = resolvedCacheTenantId(req);
   return `tenant:${tenantId}:/api/v1/dashboard/business-alerts?tenantId=${encodeURIComponent(tenantId)}`;
 }
 
 export function dashboardRecentInvoicesCacheKey(req: Request): string {
-  const tenantId = String(req.query.tenantId ?? 'default');
+  const tenantId = resolvedCacheTenantId(req);
   const limit = String(req.query.limit ?? '5');
   return `tenant:${tenantId}:/api/v1/dashboard/recent-invoices?limit=${encodeURIComponent(limit)}&tenantId=${encodeURIComponent(tenantId)}`;
 }
 
 export function dashboardSalesTrendCacheKey(req: Request): string {
-  const tenantId = String(req.query.tenantId ?? 'default');
+  const tenantId = resolvedCacheTenantId(req);
   const range = String(req.query.range ?? 'month').toLowerCase();
   return `tenant:${tenantId}:/api/v1/dashboard/sales-trend?range=${encodeURIComponent(range)}&tenantId=${encodeURIComponent(tenantId)}`;
 }
 
 export function dashboardRevenueTrendCacheKey(req: Request): string {
-  const tenantId = String(req.query.tenantId ?? 'default');
+  const tenantId = resolvedCacheTenantId(req);
   const range = String(req.query.range ?? 'month').toLowerCase();
   return `tenant:${tenantId}:/api/v1/dashboard/revenue-trend?range=${encodeURIComponent(range)}&tenantId=${encodeURIComponent(tenantId)}`;
 }

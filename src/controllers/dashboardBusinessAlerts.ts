@@ -12,6 +12,8 @@ import {
 import { PurchaseOrder, ProductionOrder, DueRecord } from '../models/extendedResources.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { sendSuccess } from '../utils/apiResponse.js';
+import { getRequestTenantId } from '../utils/tenantContext.js';
+import { getBusinessTodayIso } from '../utils/businessDate.js';
 import { serializeLeanDoc } from '../controllers/crudFactory.js';
 import {
   productLowStockFilter,
@@ -63,10 +65,6 @@ function money(n: number) {
 
 function dueValue(doc: Record<string, unknown>) {
   return Number(doc.totalDue ?? doc.due ?? doc.balance ?? 0);
-}
-
-function todayIso() {
-  return new Date().toISOString().slice(0, 10);
 }
 
 function daysBetween(fromIso: string, toIso: string) {
@@ -147,7 +145,7 @@ async function loadLeadFollowups(tenantId: string, legs: Legs) {
       ),
     legs,
   );
-  const today = todayIso();
+  const today = getBusinessTodayIso();
   const items: AlertItem[] = (docs as Array<Record<string, unknown>>).map((doc) => {
     const followUp = String(doc.nextFollowUpAt ?? '').slice(0, 10);
     const daysUntil = followUp ? daysBetween(today, followUp) : 0;
@@ -287,7 +285,7 @@ async function loadPendingPurchases(tenantId: string, legs: Legs) {
     () => facetCountAndFind(PurchaseOrder as Model<unknown>, filter, ITEM_CAP),
     legs,
   );
-  const today = todayIso();
+  const today = getBusinessTodayIso();
   const items: AlertItem[] = (docs as Array<Record<string, unknown>>).map((doc) => {
     const href = '/purchases/orders';
     const expected = String(doc.expectedDelivery ?? doc.date ?? '').slice(0, 10);
@@ -348,7 +346,7 @@ async function loadProduction(tenantId: string, legs: Legs) {
 }
 
 async function loadPaymentsDueToday(tenantId: string, legs: Legs) {
-  const today = todayIso();
+  const today = getBusinessTodayIso();
   const invoiceFilter = {
     tenantId,
     due: { $gt: 0 },
@@ -461,7 +459,7 @@ async function loadSupplierDue(tenantId: string, legs: Legs) {
 }
 
 export const getDashboardBusinessAlerts = asyncHandler(async (req: Request, res: Response) => {
-  const tenantId = String(req.query.tenantId ?? 'default');
+  const tenantId = getRequestTenantId(req);
   const started = Date.now();
   const legs: Legs = {};
 

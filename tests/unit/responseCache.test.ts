@@ -47,6 +47,7 @@ describe('cacheGetResponse dashboard routes', () => {
     const middleware = cacheGetResponse(60_000, dashboardRecentInvoicesCacheKey);
     const req = {
       method: 'GET',
+      tenantId: 'default',
       query: { tenantId: 'default', limit: '5' },
       path: '/api/v1/dashboard/recent-invoices',
     };
@@ -73,33 +74,41 @@ describe('cacheGetResponse dashboard routes', () => {
     expect(res2.statusCode).toBe(200);
   });
 
-  it('aborts inflight waiter when response finishes without cache write', async () => {
-    vi.useFakeTimers();
-    const middleware = cacheGetResponse(60_000, dashboardBusinessAlertsCacheKey);
-    const req = {
-      method: 'GET',
-      query: { tenantId: 'default' },
-      path: '/api/v1/dashboard/business-alerts',
-    };
+  it(
+    'aborts inflight waiter when response finishes without cache write',
+    async () => {
+      vi.useFakeTimers();
+      try {
+        const middleware = cacheGetResponse(60_000, dashboardBusinessAlertsCacheKey);
+        const req = {
+          method: 'GET',
+          tenantId: 'default',
+          query: { tenantId: 'default' },
+          path: '/api/v1/dashboard/business-alerts',
+        };
 
-    const res = mockRes();
-    let missNext = false;
-    await middleware(req as never, res as never, () => {
-      missNext = true;
-    });
-    expect(missNext).toBe(true);
+        const res = mockRes();
+        let missNext = false;
+        await middleware(req as never, res as never, () => {
+          missNext = true;
+        });
+        expect(missNext).toBe(true);
 
-    res.status(500).json({ success: false, error: 'handler failed' });
-    res.emit('finish');
+        res.status(500).json({ success: false, error: 'handler failed' });
+        res.emit('finish');
 
-    const res2 = mockRes();
-    let secondMissNext = false;
-    await middleware(req as never, res2 as never, () => {
-      secondMissNext = true;
-    });
-    expect(secondMissNext).toBe(true);
+        const res2 = mockRes();
+        let secondMissNext = false;
+        await middleware(req as never, res2 as never, () => {
+          secondMissNext = true;
+        });
+        expect(secondMissNext).toBe(true);
 
-    await vi.advanceTimersByTimeAsync(35_000);
-    vi.useRealTimers();
-  });
+        vi.advanceTimersByTime(35_000);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+    10_000,
+  );
 });

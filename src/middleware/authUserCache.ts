@@ -9,6 +9,8 @@ export type CachedAuthUser = {
   tenantId?: string;
   email?: string;
   name?: string;
+  allowedSections?: string[];
+  allowedPermissions?: string[];
 };
 
 type CacheEntry = {

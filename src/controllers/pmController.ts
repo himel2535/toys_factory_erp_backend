@@ -16,15 +16,12 @@ import {
   recalcProjectProgress,
   resolveEmployeeSnapshot,
 } from '../services/pmService.js';
+import { getRequestTenantId } from '../utils/tenantContext.js';
 
 type AuthUser = { _id?: unknown; email?: string; name?: string; tenantId?: string };
 
 function authUser(req: Request): AuthUser {
   return ((req as Request & { user?: AuthUser }).user ?? {}) as AuthUser;
-}
-
-function tenantIdFrom(req: Request): string {
-  return String(req.query.tenantId ?? authUser(req).tenantId ?? 'default');
 }
 
 function withOverdue(doc: Record<string, unknown>) {
@@ -38,7 +35,7 @@ function withOverdue(doc: Record<string, unknown>) {
 }
 
 export const getPmProjectSummary = asyncHandler(async (req: Request, res: Response) => {
-  const tenantId = tenantIdFrom(req);
+  const tenantId = getRequestTenantId(req);
   const today = isoDateOnly();
   const [totalProjects, activeProjects, completedProjects, overdueTasks] = await Promise.all([
     PmProject.countDocuments({ tenantId }),
@@ -55,7 +52,7 @@ export const getPmProjectSummary = asyncHandler(async (req: Request, res: Respon
 
 export const listMyPmTasks = asyncHandler(async (req: Request, res: Response) => {
   const user = authUser(req);
-  const tenantId = tenantIdFrom(req);
+  const tenantId = getRequestTenantId(req);
   const empty = { overdue: [], today: [], upcoming: [], completed: [] };
   const employee = await findEmployeeByUserEmail(String(user.email ?? ''), tenantId);
   if (!employee) {
@@ -102,7 +99,7 @@ export const listMyPmTasks = asyncHandler(async (req: Request, res: Response) =>
 });
 
 export const getPmTeamOverview = asyncHandler(async (req: Request, res: Response) => {
-  const tenantId = tenantIdFrom(req);
+  const tenantId = getRequestTenantId(req);
   const today = isoDateOnly();
   const employeeId = String(req.query.employeeId ?? '').trim();
   const projectId = String(req.query.projectId ?? '').trim();

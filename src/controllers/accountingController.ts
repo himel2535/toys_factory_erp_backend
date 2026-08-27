@@ -6,6 +6,7 @@ import {
 } from '../models/extendedResources.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { sendSuccess } from '../utils/apiResponse.js';
+import { getRequestTenantId } from '../utils/tenantContext.js';
 
 function tenantFilter(tenantId: string) {
   return { tenantId };
@@ -24,7 +25,7 @@ async function sumBySections(model: typeof BalanceSheetLine, filter: Record<stri
 }
 
 export const getBalanceSheetSummary = asyncHandler(async (req: Request, res: Response) => {
-  const filter = tenantFilter(String(req.query.tenantId ?? 'default'));
+  const filter = tenantFilter(getRequestTenantId(req));
   const [totalAssets, totalLiabilities, totalEquity, lineCount] = await Promise.all([
     sumBySections(BalanceSheetLine, filter, ASSET_SECTIONS),
     sumBySections(BalanceSheetLine, filter, LIABILITY_SECTIONS),
@@ -47,7 +48,7 @@ export const getBalanceSheetSummary = asyncHandler(async (req: Request, res: Res
 });
 
 export const getProfitLossSummary = asyncHandler(async (req: Request, res: Response) => {
-  const filter = tenantFilter(String(req.query.tenantId ?? 'default'));
+  const filter = tenantFilter(getRequestTenantId(req));
   const lines = await ProfitLossLine.find(filter).lean();
   let totalRevenue = 0;
   let totalExpense = 0;
@@ -76,7 +77,7 @@ export const getProfitLossSummary = asyncHandler(async (req: Request, res: Respo
 });
 
 export const getTrialBalanceSummary = asyncHandler(async (req: Request, res: Response) => {
-  const filter = tenantFilter(String(req.query.tenantId ?? 'default'));
+  const filter = tenantFilter(getRequestTenantId(req));
   const result = await TrialBalanceLine.aggregate([
     { $match: filter },
     {

@@ -71,8 +71,10 @@ import {
   dashboardRevenueTrendCacheKey,
 } from '../middleware/responseCache.js';
 import { requireInventoryEdit } from '../middleware/requireInventoryEdit.js';
+import { requireSectionAccess } from '../middleware/requireSectionAccess.js';
 import { createAndEmitNotification } from '../services/notify.js';
 import { getNextProductSku } from '../controllers/productSkuController.js';
+import { postAiChat } from '../controllers/aiChatController.js';
 import { PmProject } from '../models/PmProject.js';
 import { PmTask } from '../models/PmTask.js';
 import {
@@ -92,6 +94,7 @@ const LOOKUP_LIST_CACHE_MS = 300_000;
 
 export const apiRouter = Router();
 
+apiRouter.use(requireSectionAccess);
 apiRouter.use(requireInventoryEdit);
 
 function registerCrud(
@@ -383,6 +386,7 @@ apiRouter.get('/dashboard/business-alerts', cacheGetResponse(60_000, dashboardBu
 apiRouter.get('/dashboard/recent-invoices', cacheGetResponse(60_000, dashboardRecentInvoicesCacheKey), getDashboardRecentInvoices);
 apiRouter.get('/dashboard/sales-trend', cacheGetResponse(60_000, dashboardSalesTrendCacheKey), getDashboardSalesTrend);
 apiRouter.get('/dashboard/revenue-trend', cacheGetResponse(60_000, dashboardRevenueTrendCacheKey), getDashboardRevenueTrend);
+apiRouter.post('/ai/chat', postAiChat);
 apiRouter.get('/inventory/low-stock-alerts', listLowStockAlerts);
 apiRouter.get('/notifications', listNotifications);
 

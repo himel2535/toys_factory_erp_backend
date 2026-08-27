@@ -13,9 +13,10 @@ import { sendSuccess } from '../utils/apiResponse.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { clearResponseCache } from '../middleware/responseCache.js';
 import { invalidateDashboardDataLoader } from '../services/dashboardDataLoader.js';
+import { getRequestTenantId } from '../utils/tenantContext.js';
 
-function clearInventoryCaches() {
-  invalidateDashboardDataLoader('default');
+function clearInventoryCaches(tenantId: string) {
+  invalidateDashboardDataLoader(tenantId);
   clearResponseCache('/api/v1/dashboard/summary');
   clearResponseCache('/api/v1/dashboard/top-products');
   clearResponseCache('/api/v1/dashboard/business-alerts');
@@ -140,7 +141,8 @@ async function getAvailableStock(productId: string, warehouseId: string) {
 }
 
 export const approveStockIn = asyncHandler(async (req: Request, res: Response) => {
-  const doc = await StockIn.findById(req.params.id);
+  const tenantId = getRequestTenantId(req);
+  const doc = await StockIn.findOne({ _id: req.params.id, tenantId });
   if (!doc) throw notFound('Stock in record not found');
   if (doc.status === 'Approved') {
     sendSuccess(res, doc.toJSON());
@@ -153,11 +155,12 @@ export const approveStockIn = asyncHandler(async (req: Request, res: Response) =
   doc.approvedBy = String(req.body?.approvedBy ?? 'System');
   await doc.save();
   sendSuccess(res, doc.toJSON());
-  setImmediate(() => clearInventoryCaches());
+  setImmediate(() => clearInventoryCaches(getRequestTenantId(req)));
 });
 
 export const completeStockOut = asyncHandler(async (req: Request, res: Response) => {
-  const doc = await StockOut.findById(req.params.id);
+  const tenantId = getRequestTenantId(req);
+  const doc = await StockOut.findOne({ _id: req.params.id, tenantId });
   if (!doc) throw notFound('Stock out record not found');
   if (doc.status === 'Completed') {
     sendSuccess(res, doc.toJSON());
@@ -173,11 +176,12 @@ export const completeStockOut = asyncHandler(async (req: Request, res: Response)
   doc.status = 'Completed';
   await doc.save();
   sendSuccess(res, doc.toJSON());
-  setImmediate(() => clearInventoryCaches());
+  setImmediate(() => clearInventoryCaches(getRequestTenantId(req)));
 });
 
 export const completeStockTransfer = asyncHandler(async (req: Request, res: Response) => {
-  const doc = await StockTransfer.findById(req.params.id);
+  const tenantId = getRequestTenantId(req);
+  const doc = await StockTransfer.findOne({ _id: req.params.id, tenantId });
   if (!doc) throw notFound('Transfer record not found');
   if (doc.status === 'Completed') {
     sendSuccess(res, doc.toJSON());
@@ -212,11 +216,12 @@ export const completeStockTransfer = asyncHandler(async (req: Request, res: Resp
   doc.status = 'Completed';
   await doc.save();
   sendSuccess(res, doc.toJSON());
-  setImmediate(() => clearInventoryCaches());
+  setImmediate(() => clearInventoryCaches(getRequestTenantId(req)));
 });
 
 export const approveStockAdjustment = asyncHandler(async (req: Request, res: Response) => {
-  const doc = await StockAdjustment.findById(req.params.id);
+  const tenantId = getRequestTenantId(req);
+  const doc = await StockAdjustment.findOne({ _id: req.params.id, tenantId });
   if (!doc) throw notFound('Adjustment record not found');
   if (doc.status === 'Completed') {
     sendSuccess(res, doc.toJSON());
@@ -231,5 +236,5 @@ export const approveStockAdjustment = asyncHandler(async (req: Request, res: Res
   doc.approvedBy = String(req.body?.approvedBy ?? 'System');
   await doc.save();
   sendSuccess(res, doc.toJSON());
-  setImmediate(() => clearInventoryCaches());
+  setImmediate(() => clearInventoryCaches(getRequestTenantId(req)));
 });

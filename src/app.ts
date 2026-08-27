@@ -9,6 +9,7 @@ import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
 import { requestTiming } from './middleware/requestTiming.js';
 import { perfTraceMiddleware } from './middleware/perfTraceMiddleware.js';
 import { requireAuth } from './middleware/requireAuth.js';
+import { resolveTenant } from './middleware/resolveTenant.js';
 import { authRouter } from './routes/auth.routes.js';
 import { healthRouter } from './routes/health.routes.js';
 import { apiRouter } from './routes/api.routes.js';
@@ -48,7 +49,7 @@ export function createApp() {
   app.use('/health', healthRouter);
   app.use('/api/v1/auth', authRouter);
   app.use('/api/v1/admin', adminRouter);
-  app.use('/api/v1', requireAuth, apiRouter);
+  app.use('/api/v1', requireAuth, resolveTenant, apiRouter);
 
   app.use(notFoundHandler);
   app.use(errorHandler);

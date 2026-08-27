@@ -5,6 +5,8 @@ import { requireAuth } from '../middleware/requireAuth.js';
 import { scheduleReplacedCloudinaryDeletes } from '../utils/cloudinary.js';
 import mongoose from 'mongoose';
 import { invalidateAuthUserCache } from '../middleware/authUserCache.js';
+import type { AuthUser } from '../middleware/authToken.js';
+import { tenantIdFromAuthUser } from '../utils/tenantContext.js';
 
 export const adminRouter = Router();
 
@@ -56,6 +58,8 @@ adminRouter.post('/users', async (req, res, next) => {
       throw new ApiError(400, 'A user with this email already exists');
     }
     
+    const creatorTenantId = tenantIdFromAuthUser((req as { user?: AuthUser }).user);
+
     const user = new User({
       name: name.trim(),
       email: email.toLowerCase().trim(),
@@ -65,7 +69,8 @@ adminRouter.post('/users', async (req, res, next) => {
       role: isMainAdmin ? 'admin' : 'user',
       allowedSections: isMainAdmin ? ['*'] : allowedSections || [],
       allowedPermissions: isMainAdmin ? [] : (Array.isArray(allowedPermissions) ? allowedPermissions : []),
-      status: 'active'
+      status: 'active',
+      tenantId: creatorTenantId,
     });
     
     await user.save();

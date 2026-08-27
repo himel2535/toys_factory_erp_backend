@@ -1,7 +1,12 @@
 import { PmTask } from '../models/PmTask.js';
 import { User } from '../models/User.js';
 import { createAndEmitNotification } from '../services/notify.js';
-import { isoDateOnly } from '../services/pmService.js';
+import {
+  addBusinessDays,
+  businessDateKeyFromParts,
+  getBusinessDateParts,
+  getBusinessTodayIso,
+} from '../utils/businessDate.js';
 
 const INTERVAL_MS = 15 * 60 * 1000;
 
@@ -26,10 +31,8 @@ async function notifyUserByEmail(input: {
 }
 
 export async function runPmDeadlineNotifications(): Promise<void> {
-  const today = isoDateOnly();
-  const tomorrowDate = new Date();
-  tomorrowDate.setUTCDate(tomorrowDate.getUTCDate() + 1);
-  const tomorrow = isoDateOnly(tomorrowDate);
+  const today = getBusinessTodayIso();
+  const tomorrow = businessDateKeyFromParts(addBusinessDays(getBusinessDateParts(), 1));
 
   const overdue = await PmTask.find({
     status: { $ne: 'completed' },

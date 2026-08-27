@@ -2,38 +2,22 @@ import type { Request, Response } from 'express';
 import {
   Customer,
   Invoice,
-  Lead,
-  SalesOrder,
-  RawMaterial,
-  SemiFinishedProduct,
-  FinishedGood,
 } from '../models/index.js';
-import { PurchaseOrder, ProductionOrder } from '../models/extendedResources.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { sendSuccess } from '../utils/apiResponse.js';
-import { countLowStockItems } from '../utils/lowStockCount.js';
-import { currentMonthPrefix, invoiceMonthMatch } from '../utils/monthPrefix.js';
-import { formatTimingLegs, timeNamed } from '../utils/timing.js';
+import { getRequestTenantId } from '../utils/tenantContext.js';
+import { formatTimingLegs } from '../utils/timing.js';
+import { parseChartRange } from '../utils/dashboardChartSeries.js';
 import {
-  buildRevenueTrendSeries,
-  buildSalesTrendSeries,
-  parseChartRange,
-} from '../utils/dashboardChartSeries.js';
-import {
-  loadSharedInvoices,
-  loadSharedPosTransactions,
   loadSharedProductsCatalog,
-  loadSharedSalesOrders,
   loadTopProductLineAgg,
 } from '../services/dashboardDataLoader.js';
-
-type Filter = { tenantId: string };
-type Legs = Record<string, number>;
-type SummaryScope = 'kpi' | 'extra' | 'full';
-
-function tenantFilter(tenantId: string): Filter {
-  return { tenantId };
-}
+import {
+  getDashboardSummaryMetrics,
+  getRevenueTrend,
+  getSalesTrend,
+  type SummaryScope,
+} from '../services/metrics/index.js';
 
 function parseScope(raw: unknown): SummaryScope {
   const value = String(raw ?? 'full').toLowerCase();
@@ -41,163 +25,9 @@ function parseScope(raw: unknown): SummaryScope {
   return 'full';
 }
 
-function inventoryValuePipeline(filter: Record<string, unknown>, qtyField: string, valueFields: string[]) {
-  const unitValue = valueFields.reduceRight<unknown>((acc, field) => ({ $ifNull: [`$${field}`, acc] }), 0);
-  return [
-    { $match: filter },
-    {
-      $group: {
-        _id: null,
-        v: { $sum: { $multiply: [{ $ifNull: [`$${qtyField}`, 0] }, unitValue] } },
-      },
-    },
-  ];
-}
-
-async function loadKpiSummary(tenantId: string, filter: Filter, monthPrefix: string, legs: Legs) {
-  const [
-    monthSales,
-    pendingSales,
-    openLeads,
-    customerDue,
-    productionPending,
-    productionPendingQty,
-    lowStock,
-  ] = await Promise.all([
-    timeNamed('monthInvoices', () => Invoice.aggregate([
-      { $match: invoiceMonthMatch(tenantId, monthPrefix) },
-      {
-        $group: {
-          _id: null,
-          count: { $sum: 1 },
-          revenue: { $sum: { $ifNull: ['$amount', { $ifNull: ['$total', 0] }] } },
-        },
-      },
-    ]), legs),
-    timeNamed('pendingSales', () => SalesOrder.countDocuments({
-      ...filter,
-      status: { $in: ['confirmed', 'processing', 'draft', 'Confirmed', 'Processing', 'Draft'] },
-    }), legs),
-    timeNamed('openLeads', () => Lead.aggregate([
-      { $match: { ...filter, status: { $nin: ['won', 'lost', 'closed', 'Won', 'Lost', 'Closed'] } } },
-      { $group: { _id: null, count: { $sum: 1 }, pipelineValue: { $sum: { $ifNull: ['$expectedValue', 0] } } } },
-    ]), legs),
-    timeNamed('customerDue', () => Customer.aggregate([
-      { $match: filter },
-      {
-        $group: {
-          _id: null,
-          totalDue: {
-            $sum: { $ifNull: ['$totalDue', { $ifNull: ['$due', 0] }] },
-          },
-          withDue: {
-            $sum: {
-              $cond: [{ $gt: [{ $ifNull: ['$totalDue', { $ifNull: ['$due', 0] }] }, 0] }, 1, 0],
-            },
-          },
-        },
-      },
-    ]), legs),
-    timeNamed('productionPending', () => ProductionOrder.countDocuments({
-      ...filter,
-      status: { $in: ['Planned', 'In Progress'] },
-    }), legs),
-    timeNamed('productionPendingQty', () => ProductionOrder.aggregate([
-      { $match: { ...filter, status: { $in: ['Planned', 'In Progress'] } } },
-      { $group: { _id: null, qty: { $sum: { $ifNull: ['$plannedQuantity', 0] } } } },
-    ]), legs),
-    timeNamed('lowStock', () => countLowStockItems(filter, legs), legs),
-  ]);
-
-  return {
-    monthRevenue: monthSales[0]?.revenue ?? 0,
-    monthSalesCount: monthSales[0]?.count ?? 0,
-    pendingSales,
-    openLeadsCount: openLeads[0]?.count ?? 0,
-    openLeadsValue: openLeads[0]?.pipelineValue ?? 0,
-    customerDue: customerDue[0]?.totalDue ?? 0,
-    customerDueCount: customerDue[0]?.withDue ?? 0,
-    pendingProduction: productionPending,
-    pendingProductionQty: productionPendingQty[0]?.qty ?? 0,
-    lowStock,
-  };
-}
-
-async function loadExtraSummary(filter: Filter, legs: Legs) {
-  const [
-    salesSummary,
-    supplierDue,
-    productionCompleted,
-    purchaseSummary,
-    purchasePending,
-    inventoryValue,
-  ] = await Promise.all([
-    timeNamed('salesAgg', () => SalesOrder.aggregate([
-      { $match: filter },
-      { $group: { _id: null, count: { $sum: 1 }, total: { $sum: { $ifNull: ['$total', 0] } } } },
-    ]), legs),
-    timeNamed('supplierDue', () => PurchaseOrder.aggregate([
-      { $match: filter },
-      {
-        $group: {
-          _id: null,
-          totalDue: { $sum: { $ifNull: ['$due', { $ifNull: ['$balance', 0] }] } },
-          withDue: {
-            $sum: {
-              $cond: [{ $gt: [{ $ifNull: ['$due', { $ifNull: ['$balance', 0] }] }, 0] }, 1, 0],
-            },
-          },
-        },
-      },
-    ]), legs),
-    timeNamed('productionCompleted', () => ProductionOrder.aggregate([
-      { $match: { ...filter, status: 'Completed' } },
-      { $group: { _id: null, count: { $sum: 1 }, qty: { $sum: { $ifNull: ['$actualQuantity', { $ifNull: ['$plannedQuantity', 0] }] } } } },
-    ]), legs),
-    timeNamed('purchaseSummary', () => PurchaseOrder.aggregate([
-      { $match: filter },
-      { $group: { _id: null, count: { $sum: 1 }, total: { $sum: { $ifNull: ['$total', 0] } } } },
-    ]), legs),
-    timeNamed('pendingPurchase', () => PurchaseOrder.countDocuments({
-      ...filter,
-      status: { $in: ['Draft', 'Sent'] },
-    }), legs),
-    timeNamed('inventoryValue', () => Promise.all([
-      RawMaterial.aggregate(inventoryValuePipeline(filter, 'quantity', ['cost', 'price', 'supplierPrice'])),
-      SemiFinishedProduct.aggregate(inventoryValuePipeline(filter, 'quantity', ['avgCost', 'cost'])),
-      FinishedGood.aggregate(inventoryValuePipeline(filter, 'quantity', ['avgCost', 'price', 'cost'])),
-    ]), legs),
-  ]);
-
-  const rmVal = inventoryValue[0]?.[0]?.v ?? 0;
-  const sfVal = inventoryValue[1]?.[0]?.v ?? 0;
-  const fgVal = inventoryValue[2]?.[0]?.v ?? 0;
-
-  return {
-    salesSummary: {
-      count: salesSummary[0]?.count ?? 0,
-      total: salesSummary[0]?.total ?? 0,
-    },
-    purchaseSummary: {
-      count: purchaseSummary[0]?.count ?? 0,
-      total: purchaseSummary[0]?.total ?? 0,
-    },
-    supplierDue: supplierDue[0]?.totalDue ?? 0,
-    supplierDueCount: supplierDue[0]?.withDue ?? 0,
-    productionCompleted: productionCompleted[0]?.count ?? 0,
-    productionQty: productionCompleted[0]?.qty ?? 0,
-    pendingPurchase: purchasePending,
-    rmStockValue: rmVal,
-    sfStockValue: sfVal,
-    fgStockValue: fgVal,
-    totalInventoryValue: rmVal + sfVal + fgVal,
-  };
-}
-
-
 /** Ranked products from SO/invoice/POS line items — all-time, Mongo $group. */
 export const getDashboardTopProducts = asyncHandler(async (req: Request, res: Response) => {
-  const tenantId = String(req.query.tenantId ?? 'default');
+  const tenantId = getRequestTenantId(req);
   const limit = Math.min(Math.max(Number(req.query.limit) || 5, 1), 20);
   const started = Date.now();
   const aggLimit = limit * 10;
@@ -261,28 +91,11 @@ export const getDashboardTopProducts = asyncHandler(async (req: Request, res: Re
 
 /** Dashboard KPI aggregates — computed in MongoDB instead of shipping full collections. */
 export const getDashboardSummary = asyncHandler(async (req: Request, res: Response) => {
-  const tenantId = String(req.query.tenantId ?? 'default');
+  const tenantId = getRequestTenantId(req);
   const scope = parseScope(req.query.scope);
-  const filter = tenantFilter(tenantId);
-  const monthPrefix = currentMonthPrefix();
   const started = Date.now();
-  const legs: Legs = {};
 
-  let payload: Record<string, unknown>;
-  if (scope === 'kpi') {
-    payload = await loadKpiSummary(tenantId, filter, monthPrefix, legs);
-  } else if (scope === 'extra') {
-    payload = await loadExtraSummary(filter, legs);
-  } else {
-    const kpiLegs: Legs = {};
-    const extraLegs: Legs = {};
-    const [kpi, extra] = await Promise.all([
-      loadKpiSummary(tenantId, filter, monthPrefix, kpiLegs),
-      loadExtraSummary(filter, extraLegs),
-    ]);
-    Object.assign(legs, kpiLegs, extraLegs);
-    payload = { ...kpi, ...extra };
-  }
+  const { payload, legs } = await getDashboardSummaryMetrics({ tenantId, scope });
 
   const totalMs = Date.now() - started;
   console.log(`[timing] GET /dashboard/summary scope=${scope} DB ${formatTimingLegs(legs)} total=${totalMs}ms`);
@@ -291,7 +104,7 @@ export const getDashboardSummary = asyncHandler(async (req: Request, res: Respon
 
 /** Latest invoices for dashboard widget — lightweight DTO only. */
 export const getDashboardRecentInvoices = asyncHandler(async (req: Request, res: Response) => {
-  const tenantId = String(req.query.tenantId ?? 'default');
+  const tenantId = getRequestTenantId(req);
   const limit = Math.min(Math.max(Number(req.query.limit) || 5, 1), 20);
   const started = Date.now();
 
@@ -351,28 +164,20 @@ export const getDashboardRecentInvoices = asyncHandler(async (req: Request, res:
 
 /** Pre-aggregated sales trend — date-bounded Mongo reads + shared loader. */
 export const getDashboardSalesTrend = asyncHandler(async (req: Request, res: Response) => {
-  const tenantId = String(req.query.tenantId ?? 'default');
+  const tenantId = getRequestTenantId(req);
   const range = parseChartRange(req.query.range);
   const started = Date.now();
-  const [salesOrders, posReceipts] = await Promise.all([
-    loadSharedSalesOrders(tenantId, range),
-    loadSharedPosTransactions(tenantId, range),
-  ]);
-  const series = buildSalesTrendSeries(salesOrders, posReceipts, range);
+  const series = await getSalesTrend({ tenantId, range });
   console.log(`[timing] GET /dashboard/sales-trend range=${range} total=${Date.now() - started}ms points=${series.length}`);
   sendSuccess(res, series);
 });
 
 /** Pre-aggregated revenue trend — date-bounded reads, status filtered in Mongo. */
 export const getDashboardRevenueTrend = asyncHandler(async (req: Request, res: Response) => {
-  const tenantId = String(req.query.tenantId ?? 'default');
+  const tenantId = getRequestTenantId(req);
   const range = parseChartRange(req.query.range);
   const started = Date.now();
-  const [invoices, posReceipts] = await Promise.all([
-    loadSharedInvoices(tenantId, range, { revenueOnly: true }),
-    loadSharedPosTransactions(tenantId, range),
-  ]);
-  const series = buildRevenueTrendSeries(invoices, posReceipts, range);
+  const series = await getRevenueTrend({ tenantId, range });
   console.log(`[timing] GET /dashboard/revenue-trend range=${range} total=${Date.now() - started}ms points=${series.length}`);
   sendSuccess(res, series);
 });

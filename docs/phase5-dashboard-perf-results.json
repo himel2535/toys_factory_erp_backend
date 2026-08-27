@@ -1,0 +1,372 @@
+{
+  "phase": 5,
+  "measuredAt": "2026-08-27T16:11:45.402Z",
+  "apiBase": "http://localhost:5000",
+  "environment": {
+    "coldStartMode": false,
+    "warmRunsPerEndpoint": 5,
+    "serverLog": null,
+    "health": {
+      "service": "toys-factory-erp-backend",
+      "status": "ok",
+      "environment": "development",
+      "timestamp": "2026-08-27T16:11:43.065Z",
+      "database": "connected",
+      "redis": "not_configured",
+      "note": "Firebase remains the live frontend backend until you wire this API in."
+    },
+    "redis": "not_configured",
+    "database": "connected"
+  },
+  "historicalReference": {
+    "source": "web/docs/final-erp-performance-report.json (2026-08-18)",
+    "dashboardSummaryColdMs": 778,
+    "dashboardSummaryWarmMs": 17,
+    "note": "Pre-Phase-1-4 reference only; not a direct apples-to-apples comparison"
+  },
+  "comparisonToReference": {
+    "summaryColdMs": 896,
+    "summaryWarmMedianMs": 6,
+    "referenceColdMs": 778,
+    "referenceWarmMs": 17,
+    "coldDeltaPct": 15.2,
+    "warmDeltaMs": -11,
+    "warmRegressionThresholdMs": 50,
+    "warmWithinThreshold": true
+  },
+  "endpoints": [
+    {
+      "id": "summary",
+      "path": "/api/v1/dashboard/summary?scope=full",
+      "cold": {
+        "durationMs": 896,
+        "perfTrace": "auth=620ms total=890ms",
+        "perfTraceLegs": {
+          "auth": 620,
+          "total": 890
+        },
+        "bodyBytes": 522,
+        "status": 200
+      },
+      "warm": {
+        "runs": [
+          6,
+          5,
+          6,
+          6,
+          5
+        ],
+        "min": 5,
+        "max": 6,
+        "median": 6,
+        "mean": 5.6
+      },
+      "speedupRatio": 149.3,
+      "payloadShape": {
+        "valid": true,
+        "issues": []
+      }
+    },
+    {
+      "id": "sales-trend",
+      "path": "/api/v1/dashboard/sales-trend?range=month",
+      "cold": {
+        "durationMs": 13,
+        "perfTrace": "auth=1ms total=2ms",
+        "perfTraceLegs": {
+          "auth": 1,
+          "total": 2
+        },
+        "bodyBytes": 2541,
+        "status": 200
+      },
+      "warm": {
+        "runs": [
+          8,
+          8,
+          7,
+          8,
+          5
+        ],
+        "min": 5,
+        "max": 8,
+        "median": 8,
+        "mean": 7.2
+      },
+      "speedupRatio": 1.6,
+      "payloadShape": {
+        "valid": true,
+        "issues": []
+      }
+    },
+    {
+      "id": "revenue-trend",
+      "path": "/api/v1/dashboard/revenue-trend?range=month",
+      "cold": {
+        "durationMs": 8,
+        "perfTrace": "auth=1ms total=1ms",
+        "perfTraceLegs": {
+          "auth": 1,
+          "total": 1
+        },
+        "bodyBytes": 2488,
+        "status": 200
+      },
+      "warm": {
+        "runs": [
+          6,
+          6,
+          6,
+          6,
+          5
+        ],
+        "min": 5,
+        "max": 6,
+        "median": 6,
+        "mean": 5.8
+      },
+      "speedupRatio": 1.3,
+      "payloadShape": {
+        "valid": true,
+        "issues": []
+      }
+    },
+    {
+      "id": "top-products",
+      "path": "/api/v1/dashboard/top-products?limit=5",
+      "cold": {
+        "durationMs": 6,
+        "perfTrace": "auth=1ms total=1ms",
+        "perfTraceLegs": {
+          "auth": 1,
+          "total": 1
+        },
+        "bodyBytes": 724,
+        "status": 200
+      },
+      "warm": {
+        "runs": [
+          6,
+          4,
+          7,
+          6,
+          4
+        ],
+        "min": 4,
+        "max": 7,
+        "median": 6,
+        "mean": 5.4
+      },
+      "speedupRatio": 1,
+      "payloadShape": {
+        "valid": true,
+        "issues": []
+      }
+    },
+    {
+      "id": "recent-invoices",
+      "path": "/api/v1/dashboard/recent-invoices?limit=5",
+      "cold": {
+        "durationMs": 5,
+        "perfTrace": "auth=1ms total=1ms",
+        "perfTraceLegs": {
+          "auth": 1,
+          "total": 1
+        },
+        "bodyBytes": 850,
+        "status": 200
+      },
+      "warm": {
+        "runs": [
+          4,
+          5,
+          44,
+          9,
+          8
+        ],
+        "min": 4,
+        "max": 44,
+        "median": 8,
+        "mean": 14
+      },
+      "speedupRatio": 0.6,
+      "payloadShape": {
+        "valid": true,
+        "issues": []
+      }
+    },
+    {
+      "id": "business-alerts",
+      "path": "/api/v1/dashboard/business-alerts",
+      "cold": {
+        "durationMs": 8,
+        "perfTrace": "auth=1ms total=2ms",
+        "perfTraceLegs": {
+          "auth": 1,
+          "total": 2
+        },
+        "bodyBytes": 21777,
+        "status": 200
+      },
+      "warm": {
+        "runs": [
+          7,
+          8,
+          5,
+          13,
+          6
+        ],
+        "min": 5,
+        "max": 13,
+        "median": 7,
+        "mean": 7.8
+      },
+      "speedupRatio": 1.1,
+      "payloadShape": {
+        "valid": true,
+        "issues": []
+      }
+    }
+  ],
+  "parallelLoad": {
+    "cold": {
+      "totalWallMs": 344,
+      "requestCount": 6,
+      "endpoints": [
+        {
+          "id": "summary",
+          "durationMs": 40,
+          "status": 200
+        },
+        {
+          "id": "sales-trend",
+          "durationMs": 58,
+          "status": 200
+        },
+        {
+          "id": "revenue-trend",
+          "durationMs": 318,
+          "status": 200
+        },
+        {
+          "id": "top-products",
+          "durationMs": 324,
+          "status": 200
+        },
+        {
+          "id": "recent-invoices",
+          "durationMs": 331,
+          "status": 200
+        },
+        {
+          "id": "business-alerts",
+          "durationMs": 329,
+          "status": 200
+        }
+      ]
+    },
+    "warm": {
+      "totalWallMs": 140,
+      "requestCount": 6,
+      "endpoints": [
+        {
+          "id": "summary",
+          "durationMs": 79,
+          "status": 200
+        },
+        {
+          "id": "sales-trend",
+          "durationMs": 117,
+          "status": 200
+        },
+        {
+          "id": "revenue-trend",
+          "durationMs": 112,
+          "status": 200
+        },
+        {
+          "id": "top-products",
+          "durationMs": 74,
+          "status": 200
+        },
+        {
+          "id": "recent-invoices",
+          "durationMs": 74,
+          "status": 200
+        },
+        {
+          "id": "business-alerts",
+          "durationMs": 86,
+          "status": 200
+        }
+      ]
+    },
+    "sequentialColdSumMs": 936,
+    "parallelVsSequentialRatio": 0.37
+  },
+  "concurrentSalesTrend": {
+    "concurrency": 3,
+    "totalWallMs": 26,
+    "perRequestMs": [
+      21,
+      22,
+      23
+    ],
+    "min": 21,
+    "max": 23,
+    "median": 22,
+    "mean": 22
+  },
+  "serverLogAnalysis": {
+    "available": false,
+    "cacheEvents": [],
+    "timingEvents": []
+  },
+  "payloadVerification": {
+    "allValid": true,
+    "details": [
+      {
+        "id": "summary",
+        "valid": true,
+        "issues": []
+      },
+      {
+        "id": "sales-trend",
+        "valid": true,
+        "issues": []
+      },
+      {
+        "id": "revenue-trend",
+        "valid": true,
+        "issues": []
+      },
+      {
+        "id": "top-products",
+        "valid": true,
+        "issues": []
+      },
+      {
+        "id": "recent-invoices",
+        "valid": true,
+        "issues": []
+      },
+      {
+        "id": "business-alerts",
+        "valid": true,
+        "issues": []
+      }
+    ]
+  },
+  "apiRequestCounts": {
+    "perEndpointColdPlusWarm": 36,
+    "parallelLoads": 12,
+    "concurrentSalesTrend": 3,
+    "totalHttpRequests": 51
+  },
+  "regressionAssessment": {
+    "warmSummaryOverThreshold": false,
+    "warmSpeedupBelow5x": false,
+    "parallelDuplicateMongoSuspected": false,
+    "measurableRegressionDetected": false
+  }
+}

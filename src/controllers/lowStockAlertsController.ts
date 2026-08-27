@@ -7,6 +7,7 @@ import {
 } from '../models/index.js';
 import { asyncHandler, parsePagination, paginationMeta } from '../utils/asyncHandler.js';
 import { sendSuccess } from '../utils/apiResponse.js';
+import { getRequestTenantId } from '../utils/tenantContext.js';
 import { serializeLeanDoc, buildListSearchFilter } from '../controllers/crudFactory.js';
 import {
   productLowStockFilter,
@@ -100,7 +101,7 @@ function parseItemType(raw: unknown): LowStockItemType | 'all' {
 
 export const listLowStockAlerts = asyncHandler(async (req: Request, res: Response) => {
   const { page, limit, search } = parsePagination(req.query);
-  const tenantId = String(req.query.tenantId ?? 'default');
+  const tenantId = getRequestTenantId(req);
   const itemType = parseItemType(req.query.itemType);
   const searchFilter = buildListSearchFilter(search, ['name', 'sku', 'legacyId', 'category']);
   const sources = itemType === 'all' ? SOURCES : SOURCES.filter((s) => s.type === itemType);
