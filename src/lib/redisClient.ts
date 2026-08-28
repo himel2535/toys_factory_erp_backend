@@ -12,7 +12,13 @@ export async function initRedis(): Promise<void> {
   if (!env.redisUrl) return;
   try {
     const { createClient } = await import('redis');
-    client = createClient({ url: env.redisUrl });
+    client = createClient({
+      url: env.redisUrl,
+      socket: {
+        connectTimeout: 5_000,
+        reconnectStrategy: () => false,
+      },
+    });
     client.on('error', (err) => {
       console.warn('[redis] Client error — falling back to in-memory cache:', err.message);
       ready = false;
