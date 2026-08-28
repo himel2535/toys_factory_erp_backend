@@ -5,7 +5,7 @@ import { emptyInputSchema } from './sharedToolSchemas.js';
 export const getLowStockCountTool: ToolDefinition = {
   name: 'getLowStockCount',
   description:
-    'Returns the count of inventory items currently below their low-stock threshold for the authenticated tenant.',
+    'Count of inventory items below low-stock threshold for the tenant.',
   requiredSections: ['inventory'],
   inputSchema: emptyInputSchema,
   async execute(context) {

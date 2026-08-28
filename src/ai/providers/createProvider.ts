@@ -1,10 +1,12 @@
 import type { AiConfigEnabled } from '../config/aiConfig.js';
+import { loadAiChatLimits } from '../chat/aiChatLimits.js';
 import { LlmConfigError } from '../errors.js';
 import type { LLMProvider } from './types.js';
 import { createOpenAiCompatibleProvider } from './openaiCompatibleProvider.js';
 import { createLlamaCppProvider } from './llamaCppProvider.js';
 
 export function createLlmProvider(config: AiConfigEnabled): LLMProvider {
+  const limits = loadAiChatLimits();
   const runtime = {
     providerId: config.provider,
     baseUrl: config.baseUrl,
@@ -17,11 +19,14 @@ export function createLlmProvider(config: AiConfigEnabled): LLMProvider {
 
   switch (config.provider) {
     case 'openai_compatible':
-      return createOpenAiCompatibleProvider(runtime);
+      return createOpenAiCompatibleProvider({
+        ...runtime,
+        maxTokens: limits.maxOutputTokens,
+      });
     case 'llama_cpp':
       return createLlamaCppProvider({
         ...runtime,
-        maxTokens: 512,
+        maxTokens: limits.llamaMaxOutputTokens,
         chatTemplateKwargs: { enable_thinking: false },
       });
     default:

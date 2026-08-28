@@ -68,6 +68,11 @@ describe('loadAiChatLimits', () => {
     expect(loadAiChatLimits({})).toEqual({
       maxToolRounds: 3,
       maxMessageLength: 4000,
+      maxOutputTokens: 768,
+      llamaMaxOutputTokens: 512,
+      maxToolResultChars: 8000,
+      rateLimitEnabled: true,
+      rateLimitPerMin: 30,
     });
   });
 
@@ -75,9 +80,18 @@ describe('loadAiChatLimits', () => {
     expect(loadAiChatLimits({
       AI_MAX_TOOL_ROUNDS: '5',
       AI_MAX_MESSAGE_LENGTH: '8000',
+      AI_MAX_OUTPUT_TOKENS: '1024',
+      AI_MAX_TOOL_RESULT_CHARS: '4000',
+      AI_RATE_LIMIT_PER_MIN: '10',
+      AI_RATE_LIMIT_ENABLED: 'false',
     })).toEqual({
       maxToolRounds: 5,
       maxMessageLength: 8000,
+      maxOutputTokens: 1024,
+      llamaMaxOutputTokens: 512,
+      maxToolResultChars: 4000,
+      rateLimitEnabled: false,
+      rateLimitPerMin: 10,
     });
   });
 });
@@ -86,20 +100,29 @@ describe('mapAiChatError', () => {
   it('maps validation, config, timeout, and provider errors safely', () => {
     expect(mapAiChatError(new LlmValidationError('bad')).statusCode).toBe(400);
     expect(mapAiChatError(new LlmTimeoutError()).statusCode).toBe(504);
+    expect(mapAiChatError(new LlmTimeoutError()).message).toBe('AI service is taking too long. Please try again.');
     const providerErr = mapAiChatError(new LlmProviderError('Bearer sk-secret123 failed', 502));
     expect(providerErr.statusCode).toBe(502);
+    expect(providerErr.message).toBe('AI service is temporarily unavailable.');
     expect(providerErr.message).not.toContain('sk-secret123');
     expect(mapAiChatError(new ApiError(429, 'Tool round limit exceeded')).statusCode).toBe(429);
+    expect(mapAiChatError(new ApiError(429, 'AI rate limit exceeded')).message)
+      .toBe('AI service is temporarily busy. Please try again shortly.');
   });
 
-  it('maps LlmConfigError to a sanitized configuration message', () => {
+  it('maps LlmConfigError to a generic unavailable message', () => {
     const err = mapAiChatError(
       new LlmConfigError('AI_API_KEY is required for openai_compatible unless AI_ALLOW_MISSING_KEY=true'),
     );
     expect(err.statusCode).toBe(503);
-    expect(err.message).toContain('AI configuration error:');
-    expect(err.message).toContain('AI_API_KEY is required');
+    expect(err.message).toBe('AI Assistant is currently unavailable.');
     expect(err.message).not.toContain('sk-');
+  });
+
+  it('maps provider 429 to busy message', () => {
+    const err = mapAiChatError(new LlmProviderError('rate limit', 429));
+    expect(err.statusCode).toBe(429);
+    expect(err.message).toBe('AI service is temporarily busy. Please try again shortly.');
   });
 });
 
@@ -214,10 +237,18 @@ describe('runAiChat', () => {
     expect(result.message).toBe('This week sales trend shows 1,200 on the latest day.');
     expect(getSalesTrend).toHaveBeenCalledWith({ tenantId: 'tenantA', range: 'week' });
     const toolMsg = provider.calls[1]?.messages.find((m) => m.role === 'tool');
-    expect(JSON.parse(toolMsg?.content ?? '[]')).toEqual(series);
+    expect(JSON.parse(toolMsg?.content ?? '[]')).toEqual({
+      range: 'week',
+      total: 2000,
+      peak: { label: 'Aug 27', value: 1200 },
+      points: [
+        { label: 'Aug 21', value: 800 },
+        { label: 'Aug 27', value: 1200 },
+      ],
+    });
   });
 
-  it('handles multiple tool calls in one round', async () => {
+  it('skips duplicate tool calls within the same request', async () => {
     vi.mocked(getTodaySales).mockResolvedValue({ date: '2026-08-27', total: 100 });
     ensureProductionToolsRegistered();
 
@@ -250,8 +281,31 @@ describe('runAiChat', () => {
     });
 
     expect(result.message).toBe('Combined answer');
+    expect(getTodaySales).toHaveBeenCalledTimes(1);
     const toolMessages = provider.calls[1]?.messages.filter((m) => m.role === 'tool') ?? [];
     expect(toolMessages).toHaveLength(2);
+  });
+
+  it('aggregates provider usage metadata across rounds', async () => {
+    const provider = createMockProvider([
+      {
+        content: '',
+        toolCalls: [],
+        usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120 },
+      },
+    ]);
+
+    const result = await runAiChat({
+      context: baseContext,
+      message: 'Hi',
+      provider,
+    });
+
+    expect(result.metrics.usage).toEqual({
+      promptTokens: 100,
+      completionTokens: 20,
+      totalTokens: 120,
+    });
   });
 
   it('throws when tool round limit is exceeded', async () => {

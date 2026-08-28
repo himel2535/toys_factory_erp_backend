@@ -4,8 +4,12 @@ import { findForbiddenArgKeys } from '../../../../src/ai/tools/forbiddenArgs.js'
 describe('forbiddenArgs', () => {
   it('detects forbidden top-level keys', () => {
     expect(findForbiddenArgKeys({ tenantId: 'evil', message: 'ok' })).toContain('tenantId');
+    expect(findForbiddenArgKeys({ tenant: 'evil' })).toContain('tenant');
     expect(findForbiddenArgKeys({ userId: 'evil' })).toContain('userId');
     expect(findForbiddenArgKeys({ role: 'admin' })).toContain('role');
+    expect(findForbiddenArgKeys({ session: 'abc' })).toContain('session');
+    expect(findForbiddenArgKeys({ cookie: 'abc' })).toContain('cookie');
+    expect(findForbiddenArgKeys({ authorization: 'Bearer x' })).toContain('authorization');
   });
 
   it('detects forbidden nested keys case-insensitively', () => {

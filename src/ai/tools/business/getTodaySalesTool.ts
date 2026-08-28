@@ -4,7 +4,7 @@ import type { ToolDefinition } from '../types.js';
 export const getTodaySalesTool: ToolDefinition = {
   name: 'getTodaySales',
   description:
-    'Returns today\'s total sales (sales orders + POS) for the authenticated tenant using the Asia/Dhaka business calendar date.',
+    "Today's total sales (orders + POS) for the authenticated tenant (Asia/Dhaka date).",
   requiredSections: ['dashboard'],
   inputSchema: {
     type: 'object',

@@ -6,7 +6,7 @@ import { summaryScopeInputSchema } from './sharedToolSchemas.js';
 export const getDashboardSummaryTool: ToolDefinition<{ scope?: SummaryScope }> = {
   name: 'getDashboardSummary',
   description:
-    'Returns dashboard KPI/summary aggregates for the authenticated tenant. Optional scope: kpi (core KPIs), extra (extended metrics), or full (default).',
+    'Dashboard KPI/summary for the tenant. scope: kpi (core KPIs), extra, or full (default). Prefer kpi for simple KPI questions.',
   requiredSections: ['dashboard'],
   inputSchema: summaryScopeInputSchema,
   async execute(context, args) {

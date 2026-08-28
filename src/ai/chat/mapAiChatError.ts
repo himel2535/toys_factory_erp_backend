@@ -7,42 +7,48 @@ import {
   LlmValidationError,
 } from '../errors.js';
 
-function sanitizeSensitiveText(message: string): string {
+function sanitizeServerLogMessage(message: string): string {
   return message
     .replace(/Bearer\s+\S+/gi, '[redacted]')
     .replace(/sk-[a-zA-Z0-9_-]+/g, '[redacted]')
     .slice(0, 300);
 }
 
-function sanitizeProviderMessage(message: string): string {
-  return sanitizeSensitiveText(message);
-}
-
-function sanitizeConfigMessage(message: string): string {
-  return sanitizeSensitiveText(message);
-}
-
 export function mapAiChatError(error: unknown): ApiError {
   if (error instanceof ApiError) {
+    if (error.statusCode === 429 && error.message === 'AI rate limit exceeded') {
+      return new ApiError(429, 'AI service is temporarily busy. Please try again shortly.');
+    }
     return error;
   }
   if (error instanceof LlmValidationError) {
     return new ApiError(400, error.message);
   }
   if (error instanceof LlmConfigError) {
-    return new ApiError(503, `AI configuration error: ${sanitizeConfigMessage(error.message)}`);
+    console.log('[AI_CHAT] config error', { message: sanitizeServerLogMessage(error.message) });
+    return new ApiError(503, 'AI Assistant is currently unavailable.');
   }
   if (error instanceof LlmTimeoutError) {
-    return new ApiError(504, 'AI request timed out');
+    return new ApiError(504, 'AI service is taking too long. Please try again.');
   }
   if (error instanceof LlmProviderError) {
-    return new ApiError(502, sanitizeProviderMessage(error.message));
+    console.log('[AI_CHAT] provider error', {
+      status: error.statusCode,
+      message: sanitizeServerLogMessage(error.message),
+    });
+    if (error.statusCode === 429) {
+      return new ApiError(429, 'AI service is temporarily busy. Please try again shortly.');
+    }
+    if (error.statusCode !== undefined && error.statusCode >= 500) {
+      return new ApiError(502, 'AI service is temporarily unavailable.');
+    }
+    return new ApiError(502, 'AI service is temporarily unavailable.');
   }
   if (error instanceof LlmError) {
-    return new ApiError(502, 'AI provider error');
+    return new ApiError(502, 'AI service is temporarily unavailable.');
   }
   const errName = error instanceof Error ? error.constructor.name : 'unknown';
   const errMessage = error instanceof Error ? error.message : String(error);
-  console.log('[AI_CHAT] unmapped error', { name: errName, message: errMessage.slice(0, 200) });
+  console.log('[AI_CHAT] unmapped error', { name: errName, message: sanitizeServerLogMessage(errMessage) });
   return new ApiError(500, 'Internal server error');
 }

@@ -1,13 +1,18 @@
 const FORBIDDEN_ARG_KEYS = new Set([
   'tenantid',
+  'tenant',
   'userid',
   'role',
   'allowedsections',
   'allowedpermissions',
+  'permissions',
   'apikey',
   'password',
   'token',
   'secret',
+  'session',
+  'cookie',
+  'authorization',
 ]);
 
 function collectKeys(value: unknown, prefix = ''): string[] {

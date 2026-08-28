@@ -6,7 +6,7 @@ import { chartRangeInputSchema } from './sharedToolSchemas.js';
 export const getRevenueTrendTool: ToolDefinition<{ range: ChartTrendRange }> = {
   name: 'getRevenueTrend',
   description:
-    'Returns revenue trend series (invoices + POS) for the authenticated tenant over a dashboard-supported range: day, week, month, quarter, or year.',
+    'Revenue trend (invoices + POS) for the tenant. range: day | week | month | quarter | year.',
   requiredSections: ['dashboard'],
   inputSchema: chartRangeInputSchema,
   async execute(context, args) {
