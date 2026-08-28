@@ -410,6 +410,8 @@ Integration tests against live llama.cpp are **not** in the unit suite; local sm
 | 13 | Offline evaluation | Complete | Mocked-provider quality harness (~32 cases) |
 | 14 | Observability | Complete | Request correlation, latency/token/tool metrics, admin snapshot |
 | 15 | Latency & token efficiency | Complete | Output token caps verified, tool-def cache, parallel read-only tools |
+| 16 | Production hardening | Complete | Reliability/security audit fixes, focused regression tests |
+| 17 | Production readiness audit | Complete | Final-answer normalization; audit confirms Phases 12–16 sufficient |
 
 **Phase 12:** Complete — prompt injection guard (`promptGuard.ts`), in-memory per-user rate limiter (`aiRateLimiter.ts`), structured request metrics foundation (`aiRequestMetrics.ts`).
 
@@ -418,6 +420,10 @@ Integration tests against live llama.cpp are **not** in the unit suite; local sm
 **Phase 14:** Complete — LLM observability and process-local aggregation (see section 15 below).
 
 **Phase 15:** Complete — backend latency/token micro-optimizations without API or frontend changes (see section 16 below).
+
+**Phase 16:** Complete — production hardening and reliability audit (see section 17 below).
+
+**Phase 17:** Complete — production readiness audit on top of Phase 16 (see section 18 below).
 
 ---
 
@@ -495,6 +501,95 @@ For the common case (one tool call per request), **MongoDB/metrics latency domin
 
 ---
 
+## 17. Phase 16 — Production Hardening
+
+Backend-only reliability and security audit. **No frontend or API contract changes.**
+
+### What was hardened
+
+| Area | Fix |
+|------|-----|
+| Tool follow-up rounds | Tool messages now use the current LLM `tool_calls[i].id` (not cached executor ID) so Groq follow-up rounds stay correlated |
+| Dedupe cache keys | JSON args normalized before cache lookup — avoids duplicate DB work for whitespace/key-order variants |
+| Forbidden tool args | Nested arrays traversed; `tenant_id` / `user_id` snake_case variants blocked |
+| Provider malformed 200 | Non-JSON body, missing `choices`, or all-invalid `tool_calls` → `LlmProviderError` (502 to client) instead of silent empty responses |
+| GPT-OSS reasoning | Preserved — only used when content is blank **and** there are no tool calls |
+| Server error logs | Controller catch block sanitizes messages (Bearer tokens, `sk-*` keys) before logging |
+| Tool-round 429 | Maps to the same friendly busy message as user rate limit |
+| Rate limiter memory | Expired idle window entries removed from the in-memory map on next access |
+| Metrics `finally` | Wrapped in try/catch so metrics emission failures cannot mask request errors |
+
+### What was intentionally NOT changed
+
+- Frontend, API contract, streaming (still deferred)
+- Redis, RAG, vector DB, queues — not introduced
+- Groq / `openai_compatible` provider architecture
+- Token limits (768 / 512), `AI_MAX_TOOL_ROUNDS` (3), timeouts
+- In-memory rate limiter design (process-local; resets on restart)
+- Prompt guard regex set (known limitation: pattern-only, not semantic)
+- Phase 14 metrics shape and admin snapshot endpoint
+
+### Current limitations (unchanged)
+
+- Rate limiter and metrics are **process-local** — not shared across replicas; counters reset on restart
+- Prompt guard is regex-based — sophisticated obfuscation may bypass it
+- Groq (`openai_compatible` + `openai/gpt-oss-20b`) remains the recommended production provider when `AI_ENABLED=true`
+
+### Testing performed
+
+`npm run lint`, `npm run build`, `npx vitest run tests/unit/ai/`, `npm run test:ai-eval`
+
+---
+
+## 18. Phase 17 — Production Readiness Audit
+
+Audit-first pass on top of Phase 16. **No frontend or API contract changes.**
+
+### What changed
+
+| Area | Change |
+|------|--------|
+| Provider text normalization | `httpChatCompletions.ts` treats non-string `content` / `reasoning` as empty — prevents `[object Object]` reaching the client |
+| Final-answer guard | `aiChatService.ts` rejects whitespace-only and `[object Object]` before the empty-response fallback |
+
+### Audit conclusion (already correct — no code change)
+
+- Full request lifecycle: rate limit and prompt guard before provider; metrics in `finally` on all paths
+- Timeout/abort: `AbortController` + `LlmTimeoutError`; no hang after timeout
+- **Retries:** intentionally none — retries could duplicate tool execution; deferred
+- Tool safety: server-side context, RBAC, forbidden args (including arrays), safe error messages
+- Context efficiency: system prompt once per call; empty messages filtered; no conversation persistence
+- Tool result compression: trend rollup + `AI_MAX_TOOL_RESULT_CHARS` + `truncated: true`
+- Cost controls unchanged: 768 output tokens, 3 tool rounds, 30 req/min, 8000 tool-result chars
+- `.env.example` documents all AI variables including `AI_TIMEOUT_MS=60000` for Groq
+
+### Cost / reliability / security impact
+
+- **Cost:** no limit increases; no extra provider or tool rounds
+- **Reliability:** eliminates malformed non-string provider content leaking to users
+- **Security:** Phase 16 boundaries unchanged (auth, RBAC, tenant isolation, sanitized logs)
+
+### Intentionally deferred
+
+- Redis (rate limit / metrics persistence)
+- Vector DB / RAG / embeddings
+- Streaming responses
+- Persistent conversation memory
+- Provider retry policy
+
+### Production configuration (recommended)
+
+- `AI_PROVIDER=openai_compatible`
+- `AI_BASE_URL=https://api.groq.com/openai/v1`
+- `AI_MODEL=openai/gpt-oss-20b`
+- `AI_TIMEOUT_MS=60000`
+
+### Testing performed
+
+`npm run lint`, `npm run build`, `npx vitest run tests/unit/ai/`, `npm run test:ai-eval`
+
+---
+
 ## For Future Developers
 
 1. **Enable AI:** Set `AI_ENABLED=true` and provider vars in `.env`; restart backend so `getLlmProvider()` reloads config.
@@ -507,4 +602,4 @@ For the common case (one tool call per request), **MongoDB/metrics latency domin
 
 ---
 
-*Last aligned with codebase: Phases 6–15 complete. Configuration defaults from `src/ai/config/aiConfig.ts` and `.env.example`.*
+*Last aligned with codebase: Phases 6–17 complete. Configuration defaults from `src/ai/config/aiConfig.ts` and `.env.example`.*

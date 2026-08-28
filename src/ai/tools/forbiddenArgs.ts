@@ -1,7 +1,9 @@
 const FORBIDDEN_ARG_KEYS = new Set([
   'tenantid',
+  'tenant_id',
   'tenant',
   'userid',
+  'user_id',
   'role',
   'allowedsections',
   'allowedpermissions',
@@ -16,8 +18,17 @@ const FORBIDDEN_ARG_KEYS = new Set([
 ]);
 
 function collectKeys(value: unknown, prefix = ''): string[] {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+  if (value === null || typeof value !== 'object') {
     return prefix ? [prefix] : [];
+  }
+
+  if (Array.isArray(value)) {
+    const keys: string[] = [];
+    value.forEach((item, index) => {
+      const path = prefix ? `${prefix}[${index}]` : `[${index}]`;
+      keys.push(...collectKeys(item, path));
+    });
+    return keys;
   }
 
   const keys: string[] = [];

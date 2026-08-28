@@ -106,6 +106,11 @@ function normalizeUsage(raw: RawChatCompletionResponse['usage']) {
   };
 }
 
+function normalizeProviderText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  return '';
+}
+
 function mergeAbortSignals(
   timeoutMs: number,
   external?: AbortSignal,
@@ -180,12 +185,28 @@ export async function postChatCompletions(
       throw new LlmProviderError(message, response.status, payload ?? rawText);
     }
 
-    const choice = payload?.choices?.[0];
+    if (rawText && payload === null) {
+      throw new LlmProviderError('Invalid provider response', 502);
+    }
+
+    if (!payload?.choices?.length) {
+      throw new LlmProviderError('Invalid provider response', 502);
+    }
+
+    const choice = payload.choices[0];
     const message = choice?.message;
-    const toolCalls = normalizeToolCalls(message?.tool_calls);
-    let content = String(message?.content ?? '');
+    const rawToolCalls = message?.tool_calls;
+    const toolCalls = normalizeToolCalls(rawToolCalls);
+
+    if (
+      (choice?.finish_reason === 'tool_calls' || (rawToolCalls?.length ?? 0) > 0)
+      && toolCalls.length === 0
+    ) {
+      throw new LlmProviderError('Invalid provider response', 502);
+    }
+    let content = normalizeProviderText(message?.content);
     if (!content.trim() && !toolCalls.length) {
-      const reasoning = String(message?.reasoning ?? '').trim();
+      const reasoning = normalizeProviderText(message?.reasoning).trim();
       if (reasoning) content = reasoning;
     }
 

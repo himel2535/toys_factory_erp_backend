@@ -18,6 +18,10 @@ export function resetAiRateLimiterForTests(): void {
   windows.clear();
 }
 
+export function getAiRateLimiterEntryCountForTests(): number {
+  return windows.size;
+}
+
 export function checkAiRateLimit(userId: string, env: NodeJS.ProcessEnv = process.env): void {
   const { rateLimitEnabled, rateLimitPerMin } = loadAiChatLimits(env);
   if (!rateLimitEnabled) return;
@@ -27,12 +31,18 @@ export function checkAiRateLimit(userId: string, env: NodeJS.ProcessEnv = proces
 
   const now = Date.now();
   let entry = windows.get(key);
+  if (entry) {
+    pruneOldTimestamps(entry, now, WINDOW_MS);
+    if (entry.timestamps.length === 0) {
+      windows.delete(key);
+      entry = undefined;
+    }
+  }
+
   if (!entry) {
     entry = { timestamps: [] };
     windows.set(key, entry);
   }
-
-  pruneOldTimestamps(entry, now, WINDOW_MS);
 
   if (entry.timestamps.length >= rateLimitPerMin) {
     throw new ApiError(429, 'AI rate limit exceeded');

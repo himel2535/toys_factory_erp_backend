@@ -41,10 +41,35 @@ function buildSystemPrompt(): string {
   return `${ERP_AI_SYSTEM_PROMPT} ${ERP_AI_SECURITY_APPENDIX}`;
 }
 
+function normalizeFinalAnswer(content: string): string {
+  const trimmed = content.trim();
+  if (!trimmed || trimmed === '[object Object]') {
+    return '';
+  }
+  return trimmed;
+}
+
+function stableToolArgsKey(raw: string): string {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const record = parsed as Record<string, unknown>;
+      const normalized: Record<string, unknown> = {};
+      for (const key of Object.keys(record).sort()) {
+        normalized[key] = record[key];
+      }
+      return JSON.stringify(normalized);
+    }
+    return JSON.stringify(parsed);
+  } catch {
+    return raw;
+  }
+}
+
 function toolCallCacheKey(toolCall: LlmToolCall): string {
   const name = String(toolCall.function?.name ?? '').trim();
   const args = String(toolCall.function?.arguments ?? '{}').trim() || '{}';
-  return `${name}:${args}`;
+  return `${name}:${stableToolArgsKey(args)}`;
 }
 
 function parseToolCallRange(toolCall: LlmToolCall): string | undefined {
@@ -179,7 +204,7 @@ export async function runAiChat(input: RunAiChatInput): Promise<AiChatResult> {
     });
 
     if (!response.toolCalls.length) {
-      const answer = response.content.trim();
+      const answer = normalizeFinalAnswer(response.content);
       return {
         message: answer || 'I could not generate a response.',
         metrics: {
@@ -213,10 +238,11 @@ export async function runAiChat(input: RunAiChatInput): Promise<AiChatResult> {
     );
 
     for (let i = 0; i < response.toolCalls.length; i += 1) {
+      const toolCall = response.toolCalls[i]!;
       const { result, range } = roundResults[i]!;
       messages.push({
         role: 'tool',
-        toolCallId: result.toolCallId,
+        toolCallId: toolCall.id,
         content: toolResultContent(result, { range, env }),
       });
     }

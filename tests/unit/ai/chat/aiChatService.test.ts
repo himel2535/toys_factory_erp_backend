@@ -110,6 +110,8 @@ describe('mapAiChatError', () => {
     expect(providerErr.message).toBe('AI service is temporarily unavailable.');
     expect(providerErr.message).not.toContain('sk-secret123');
     expect(mapAiChatError(new ApiError(429, 'Tool round limit exceeded')).statusCode).toBe(429);
+    expect(mapAiChatError(new ApiError(429, 'Tool round limit exceeded')).message)
+      .toBe('AI service is temporarily busy. Please try again shortly.');
     expect(mapAiChatError(new ApiError(429, 'AI rate limit exceeded')).message)
       .toBe('AI service is temporarily busy. Please try again shortly.');
   });
@@ -380,6 +382,75 @@ describe('runAiChat', () => {
     expect(getTodaySales).toHaveBeenCalledTimes(1);
     const toolMessages = provider.calls[1]?.messages.filter((m) => m.role === 'tool') ?? [];
     expect(toolMessages).toHaveLength(2);
+    expect(toolMessages[0]?.toolCallId).toBe('call_a');
+    expect(toolMessages[1]?.toolCallId).toBe('call_b');
+  });
+
+  it('returns fallback message when provider final content is empty', async () => {
+    const provider = createMockProvider([{
+      content: '   ',
+      toolCalls: [],
+    }]);
+
+    const result = await runAiChat({
+      context: baseContext,
+      message: 'Hi',
+      provider,
+    });
+
+    expect(result.message).toBe('I could not generate a response.');
+  });
+
+  it('returns fallback message when provider final content is [object Object]', async () => {
+    const provider = createMockProvider([{
+      content: '[object Object]',
+      toolCalls: [],
+    }]);
+
+    const result = await runAiChat({
+      context: baseContext,
+      message: 'Hi',
+      provider,
+    });
+
+    expect(result.message).toBe('I could not generate a response.');
+  });
+
+  it('dedupes semantically identical tool args with different JSON formatting', async () => {
+    vi.mocked(getSalesTrend).mockResolvedValue([
+      { key: '2026-08-27', date: '2026-08-27', label: 'Aug 27', value: 1200 },
+    ]);
+    ensureProductionToolsRegistered();
+
+    const provider = createMockProvider([
+      {
+        content: '',
+        toolCalls: [
+          {
+            id: 'call_a',
+            type: 'function',
+            function: { name: 'getSalesTrend', arguments: '{"range":"week"}' },
+          },
+          {
+            id: 'call_b',
+            type: 'function',
+            function: { name: 'getSalesTrend', arguments: '{ "range": "week" }' },
+          },
+        ],
+      },
+      {
+        content: 'Trend answer',
+        toolCalls: [],
+      },
+    ]);
+
+    await runAiChat({
+      context: baseContext,
+      message: 'Trend?',
+      provider,
+    });
+
+    expect(getSalesTrend).toHaveBeenCalledTimes(1);
   });
 
   it('aggregates provider usage metadata across rounds', async () => {

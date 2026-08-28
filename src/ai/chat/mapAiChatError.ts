@@ -7,7 +7,7 @@ import {
   LlmValidationError,
 } from '../errors.js';
 
-function sanitizeServerLogMessage(message: string): string {
+export function sanitizeServerLogMessage(message: string): string {
   return message
     .replace(/Bearer\s+\S+/gi, '[redacted]')
     .replace(/sk-[a-zA-Z0-9_-]+/g, '[redacted]')
@@ -16,7 +16,10 @@ function sanitizeServerLogMessage(message: string): string {
 
 export function mapAiChatError(error: unknown): ApiError {
   if (error instanceof ApiError) {
-    if (error.statusCode === 429 && error.message === 'AI rate limit exceeded') {
+    if (
+      error.statusCode === 429
+      && (error.message === 'AI rate limit exceeded' || error.message === 'Tool round limit exceeded')
+    ) {
       return new ApiError(429, 'AI service is temporarily busy. Please try again shortly.');
     }
     return error;

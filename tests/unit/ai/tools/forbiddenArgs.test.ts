@@ -19,4 +19,13 @@ describe('forbiddenArgs', () => {
   it('allows safe keys', () => {
     expect(findForbiddenArgKeys({ message: 'hello', count: 1 })).toEqual([]);
   });
+
+  it('detects forbidden keys inside arrays', () => {
+    expect(findForbiddenArgKeys({ items: [{ tenantId: 'evil' }] })).toContain('items[0].tenantId');
+  });
+
+  it('detects snake_case forbidden keys', () => {
+    expect(findForbiddenArgKeys({ tenant_id: 'evil' })).toContain('tenant_id');
+    expect(findForbiddenArgKeys({ user_id: 'evil' })).toContain('user_id');
+  });
 });

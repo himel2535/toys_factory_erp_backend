@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
-import { checkAiRateLimit, resetAiRateLimiterForTests } from '../../../../src/ai/chat/aiRateLimiter.js';
+import { checkAiRateLimit, getAiRateLimiterEntryCountForTests, resetAiRateLimiterForTests } from '../../../../src/ai/chat/aiRateLimiter.js';
 import { ApiError } from '../../../../src/utils/ApiError.js';
 
 describe('checkAiRateLimit', () => {
@@ -38,5 +38,15 @@ describe('checkAiRateLimit', () => {
     const env = { AI_RATE_LIMIT_ENABLED: 'false', AI_RATE_LIMIT_PER_MIN: '1' };
     checkAiRateLimit('user-c', env);
     expect(() => checkAiRateLimit('user-c', env)).not.toThrow();
+  });
+
+  it('evicts expired idle entries from the in-memory map', () => {
+    vi.useFakeTimers();
+    const env = { AI_RATE_LIMIT_ENABLED: 'true', AI_RATE_LIMIT_PER_MIN: '5' };
+    checkAiRateLimit('idle-user', env);
+    expect(getAiRateLimiterEntryCountForTests()).toBe(1);
+    vi.advanceTimersByTime(61_000);
+    checkAiRateLimit('idle-user', env);
+    expect(getAiRateLimiterEntryCountForTests()).toBe(1);
   });
 });

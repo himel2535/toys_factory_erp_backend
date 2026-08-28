@@ -2,7 +2,7 @@ import type { Request, Response } from 'express';
 import { loadAiConfig } from '../ai/config/aiConfig.js';
 import { buildAiExecutionContext } from '../ai/context/buildAiContext.js';
 import { runAiChat } from '../ai/chat/aiChatService.js';
-import { mapAiChatError } from '../ai/chat/mapAiChatError.js';
+import { mapAiChatError, sanitizeServerLogMessage } from '../ai/chat/mapAiChatError.js';
 import { validateChatMessage } from '../ai/chat/validateChatMessage.js';
 import { checkPromptInjection } from '../ai/chat/promptGuard.js';
 import { checkAiRateLimit } from '../ai/chat/aiRateLimiter.js';
@@ -107,10 +107,18 @@ export const postAiChat = asyncHandler(async (req: Request, res: Response) => {
       requestId,
       elapsedMs: Date.now() - requestStartedAt,
       name: errName,
-      message: errMessage.slice(0, 200),
+      message: sanitizeServerLogMessage(errMessage),
     });
     throw mapAiChatError(error);
   } finally {
-    emitRequestMetrics(tracker, requestStartedAt, configSnapshot, finalStatus, caughtError);
+    try {
+      emitRequestMetrics(tracker, requestStartedAt, configSnapshot, finalStatus, caughtError);
+    } catch (metricsError) {
+      const metricsMessage = metricsError instanceof Error ? metricsError.message : String(metricsError);
+      console.log('[AI_CHAT] metrics emit failed', {
+        requestId,
+        message: sanitizeServerLogMessage(metricsMessage),
+      });
+    }
   }
 });
