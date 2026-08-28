@@ -10,6 +10,7 @@ const groqRuntime = {
   timeoutMs: 60_000,
   debug: false,
   supportsTools: true,
+  maxTokens: 768,
 };
 
 const runtime = {
@@ -194,8 +195,27 @@ describe('openaiCompatibleProvider', () => {
     const body = JSON.parse(String(fetchMock.mock.calls[0]![1]?.body));
     expect(body.model).toBe('openai/gpt-oss-20b');
     expect(body.chat_template_kwargs).toBeUndefined();
-    expect(body.max_tokens).toBeUndefined();
+    expect(body.max_tokens).toBe(768);
     expect(body.tool_choice).toBe('auto');
+  });
+
+  it('omits max_tokens when runtime config does not set maxTokens', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        choices: [{ finish_reason: 'stop', message: { content: 'Hello' } }],
+      }),
+    }));
+
+    const provider = createOpenAiCompatibleProvider({
+      ...groqRuntime,
+      maxTokens: undefined,
+    });
+    await provider.generate({ messages: [{ role: 'user', content: 'Hi' }] });
+
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0]![1]?.body));
+    expect(body.max_tokens).toBeUndefined();
   });
 
   it('uses message.reasoning as content fallback when content is empty and no tool calls', async () => {

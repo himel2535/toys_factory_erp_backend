@@ -15,6 +15,7 @@ vi.mock('../../../../src/ai/config/aiConfig.js', () => ({
 import { loadAiConfig } from '../../../../src/ai/config/aiConfig.js';
 import { runAiChat } from '../../../../src/ai/chat/aiChatService.js';
 import { resetAiRateLimiterForTests } from '../../../../src/ai/chat/aiRateLimiter.js';
+import { resetAiMetricsAggregatorForTests } from '../../../../src/ai/chat/aiMetricsAggregator.js';
 import { postAiChat } from '../../../../src/controllers/aiChatController.js';
 
 function mockReqRes(body: unknown, user?: AuthUser, tenantId = 'tenantA') {
@@ -49,6 +50,7 @@ describe('postAiChat', () => {
     vi.mocked(runAiChat).mockClear();
     vi.mocked(loadAiConfig).mockClear();
     resetAiRateLimiterForTests();
+    resetAiMetricsAggregatorForTests();
   });
 
   it('rejects when AI is disabled before calling the provider', async () => {
@@ -63,6 +65,7 @@ describe('postAiChat', () => {
   });
 
   it('allows authorized chat when AI is enabled', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     vi.mocked(loadAiConfig).mockReturnValue({
       enabled: true,
       provider: 'openai_compatible',
@@ -90,6 +93,12 @@ describe('postAiChat', () => {
     });
     expect(JSON.stringify(json.mock.calls)).not.toContain('secret-key-should-not-leak');
     expect(next).not.toHaveBeenCalled();
+
+    const metricsLog = logSpy.mock.calls.find((call) => String(call[0]).includes('[AI_CHAT] metrics'));
+    expect(metricsLog?.[1]).toContain('ai_chat_metrics');
+    expect(metricsLog?.[1]).toContain('"status":"success"');
+    expect(metricsLog?.[1]).not.toContain('Sales today?');
+    logSpy.mockRestore();
   });
 
   it('blocks prompt injection before calling the provider', async () => {

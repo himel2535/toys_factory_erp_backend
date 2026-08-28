@@ -24,7 +24,7 @@ export type ProviderRuntimeConfig = {
   timeoutMs: number;
   debug: boolean;
   supportsTools: boolean;
-  /** Cap completion length for local models (llama.cpp). */
+  /** Cap completion length sent as max_tokens to the provider API (all providers). */
   maxTokens?: number;
   /** Passed to llama.cpp chat_template_kwargs (e.g. Qwen3 enable_thinking). */
   chatTemplateKwargs?: Record<string, unknown>;

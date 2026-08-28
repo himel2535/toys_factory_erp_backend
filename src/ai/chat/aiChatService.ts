@@ -4,13 +4,18 @@ import type { AiExecutionContext } from '../context/types.js';
 import type { LLMProvider } from '../providers/types.js';
 import type { LlmMessage, LlmToolCall } from '../types.js';
 import { executeToolCall } from '../tools/toolExecutor.js';
+import type { ToolErrorCode } from '../tools/errors.js';
 import { registeredToolsToLlmDefinitions } from '../tools/llmToolBridge.js';
 import type { ToolExecutionResult } from '../tools/types.js';
 import { filterMessagesForProvider } from './buildLlmMessages.js';
 import { toolResultContent } from './compressToolResult.js';
 import { loadAiChatLimits } from './aiChatLimits.js';
 import { ERP_AI_SECURITY_APPENDIX, ERP_AI_SYSTEM_PROMPT } from './systemPrompt.js';
-import { createEmptyUsage, mergeUsage, type AiUsageTotals } from './aiRequestMetrics.js';
+import {
+  createAiRequestMetricsTracker,
+  type AiRequestMetricsTracker,
+  type AiUsageTotals,
+} from './aiRequestMetrics.js';
 
 export type AiChatResult = {
   message: string;
@@ -28,6 +33,8 @@ export type RunAiChatInput = {
   message: string;
   provider?: LLMProvider;
   env?: NodeJS.ProcessEnv;
+  metricsTracker?: AiRequestMetricsTracker;
+  requestId?: string;
 };
 
 function buildSystemPrompt(): string {
@@ -49,8 +56,94 @@ function parseToolCallRange(toolCall: LlmToolCall): string | undefined {
   }
 }
 
+type ToolRoundResult = {
+  result: ToolExecutionResult;
+  range?: string;
+};
+
+async function executeToolCallsForRound(
+  context: AiExecutionContext,
+  toolCalls: LlmToolCall[],
+  toolResultCache: Map<string, ToolExecutionResult>,
+  tracker: AiRequestMetricsTracker,
+  toolRounds: number,
+): Promise<ToolRoundResult[]> {
+  const cachedBeforeRound = new Set<string>();
+  const uniqueUncached = new Map<string, LlmToolCall>();
+
+  for (const toolCall of toolCalls) {
+    const cacheKey = toolCallCacheKey(toolCall);
+    if (toolResultCache.has(cacheKey)) {
+      cachedBeforeRound.add(cacheKey);
+    } else if (!uniqueUncached.has(cacheKey)) {
+      uniqueUncached.set(cacheKey, toolCall);
+    }
+  }
+
+  if (uniqueUncached.size > 0) {
+    await Promise.all([...uniqueUncached.entries()].map(async ([cacheKey, toolCall]) => {
+      const toolStartedAt = Date.now();
+      console.log('[AI_CHAT] tool round', {
+        requestId: tracker.requestId,
+        toolRounds,
+        toolName: toolCall.function.name,
+      });
+      const result = await executeToolCall(context, toolCall);
+      const toolElapsedMs = Date.now() - toolStartedAt;
+      toolResultCache.set(cacheKey, result);
+      tracker.recordToolExecution({
+        toolName: result.toolName,
+        durationMs: toolElapsedMs,
+        ok: result.ok,
+        errorCode: result.error?.code as ToolErrorCode | undefined,
+      });
+      console.log('[AI_CHAT] tool execution completed', {
+        requestId: tracker.requestId,
+        toolRounds,
+        toolName: result.toolName,
+        ok: result.ok,
+        elapsedMs: toolElapsedMs,
+      });
+    }));
+  }
+
+  const seenThisRound = new Set<string>();
+  return toolCalls.map((toolCall) => {
+    const cacheKey = toolCallCacheKey(toolCall);
+    const result = toolResultCache.get(cacheKey);
+    if (!result) {
+      throw new Error(`Missing tool result for ${toolCall.function.name}`);
+    }
+
+    const skippedDuplicate = cachedBeforeRound.has(cacheKey) || seenThisRound.has(cacheKey);
+    if (skippedDuplicate) {
+      console.log('[AI_CHAT] duplicate tool skipped', {
+        requestId: tracker.requestId,
+        toolRounds,
+        toolName: toolCall.function.name,
+      });
+      tracker.recordToolExecution({
+        toolName: toolCall.function.name,
+        durationMs: 0,
+        ok: result.ok,
+        errorCode: result.error?.code as ToolErrorCode | undefined,
+        skippedDuplicate: true,
+      });
+    }
+    seenThisRound.add(cacheKey);
+
+    return {
+      result,
+      range: parseToolCallRange(toolCall),
+    };
+  });
+}
+
 export async function runAiChat(input: RunAiChatInput): Promise<AiChatResult> {
-  const { context, message, provider, env = process.env } = input;
+  const { context, message, provider, env = process.env, requestId } = input;
+  const tracker = input.metricsTracker ?? createAiRequestMetricsTracker({
+    requestId: requestId ?? 'internal',
+  });
   const llm = provider ?? getLlmProvider();
   const tools = registeredToolsToLlmDefinitions();
   const { maxToolRounds } = loadAiChatLimits(env);
@@ -58,27 +151,28 @@ export async function runAiChat(input: RunAiChatInput): Promise<AiChatResult> {
 
   const messages: LlmMessage[] = [{ role: 'user', content: message }];
   let toolRounds = 0;
-  let providerMs = 0;
-  let toolMs = 0;
-  let toolCallCount = 0;
-  let usage = createEmptyUsage();
   const toolResultCache = new Map<string, ToolExecutionResult>();
 
   while (true) {
     const roundStartedAt = Date.now();
     const providerMessages = filterMessagesForProvider(messages);
-    console.log('[AI_CHAT] provider start', { toolRounds, messageCount: providerMessages.length });
+    console.log('[AI_CHAT] provider start', {
+      requestId: tracker.requestId,
+      toolRounds,
+      messageCount: providerMessages.length,
+    });
     const response = await llm.generateWithTools({
       system,
       messages: providerMessages,
       tools,
       toolChoice: 'auto',
     });
-    providerMs += Date.now() - roundStartedAt;
-    usage = mergeUsage(usage, response.usage);
+    const providerElapsedMs = Date.now() - roundStartedAt;
+    tracker.recordProviderCall(providerElapsedMs, response.usage);
     console.log('[AI_CHAT] provider completed', {
+      requestId: tracker.requestId,
       toolRounds,
-      elapsedMs: Date.now() - roundStartedAt,
+      elapsedMs: providerElapsedMs,
       finishReason: response.finishReason,
       toolCallCount: response.toolCalls.length,
       contentLength: response.content.length,
@@ -89,16 +183,17 @@ export async function runAiChat(input: RunAiChatInput): Promise<AiChatResult> {
       return {
         message: answer || 'I could not generate a response.',
         metrics: {
-          providerMs,
-          toolMs,
-          toolCallCount,
-          toolRounds,
-          usage,
+          providerMs: tracker.providerMs,
+          toolMs: tracker.toolMs,
+          toolCallCount: tracker.toolCallCount,
+          toolRounds: tracker.toolRounds,
+          usage: tracker.usage,
         },
       };
     }
 
     toolRounds += 1;
+    tracker.recordToolRound();
     if (toolRounds > maxToolRounds) {
       throw new ApiError(429, 'Tool round limit exceeded');
     }
@@ -109,30 +204,16 @@ export async function runAiChat(input: RunAiChatInput): Promise<AiChatResult> {
       toolCalls: response.toolCalls,
     });
 
-    for (const toolCall of response.toolCalls) {
-      const cacheKey = toolCallCacheKey(toolCall);
-      let result = toolResultCache.get(cacheKey);
-      if (result) {
-        console.log('[AI_CHAT] duplicate tool skipped', {
-          toolRounds,
-          toolName: toolCall.function.name,
-        });
-      } else {
-        const toolStartedAt = Date.now();
-        console.log('[AI_CHAT] tool round', { toolRounds, toolName: toolCall.function.name });
-        result = await executeToolCall(context, toolCall);
-        toolMs += Date.now() - toolStartedAt;
-        toolCallCount += 1;
-        toolResultCache.set(cacheKey, result);
-        console.log('[AI_CHAT] tool execution completed', {
-          toolRounds,
-          toolName: result.toolName,
-          ok: result.ok,
-          elapsedMs: Date.now() - toolStartedAt,
-        });
-      }
+    const roundResults = await executeToolCallsForRound(
+      context,
+      response.toolCalls,
+      toolResultCache,
+      tracker,
+      toolRounds,
+    );
 
-      const range = parseToolCallRange(toolCall);
+    for (let i = 0; i < response.toolCalls.length; i += 1) {
+      const { result, range } = roundResults[i]!;
       messages.push({
         role: 'tool',
         toolCallId: result.toolCallId,

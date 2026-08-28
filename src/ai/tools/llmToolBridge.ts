@@ -16,9 +16,30 @@ export function toolsToLlmDefinitions(tools: ToolDefinition[]): LlmToolDefinitio
   }));
 }
 
+let cachedRegisteredDefinitions: LlmToolDefinition[] | null = null;
+let cachedRegisteredSignature: string | null = null;
+
+function registeredToolsSignature(): string {
+  return listTools()
+    .map((tool) => tool.name)
+    .sort()
+    .join('\0');
+}
+
+export function invalidateRegisteredToolDefinitionsCacheForTests(): void {
+  cachedRegisteredDefinitions = null;
+  cachedRegisteredSignature = null;
+}
+
 export function registeredToolsToLlmDefinitions(): LlmToolDefinition[] {
   ensureProductionToolsRegistered();
-  return toolsToLlmDefinitions(listTools());
+  const signature = registeredToolsSignature();
+  if (cachedRegisteredDefinitions && cachedRegisteredSignature === signature) {
+    return cachedRegisteredDefinitions;
+  }
+  cachedRegisteredDefinitions = toolsToLlmDefinitions(listTools());
+  cachedRegisteredSignature = signature;
+  return cachedRegisteredDefinitions;
 }
 
 export async function executeLlmToolCalls(

@@ -406,8 +406,92 @@ Integration tests against live llama.cpp are **not** in the unit suite; local sm
 | 9 | Chat API + agent loop | Complete | `POST /api/v1/ai/chat`, stateless tool loop, error mapping |
 | 10 | Production read-only tools | Complete | 5 tools, metrics reuse, no mutations |
 | 11 | Frontend integration (API) | Complete | Cookie auth, `{ message }` only, long-timeout proxy path |
+| 12 | Prompt guard + rate limit | Complete | Injection patterns blocked; in-memory per-user rate limit |
+| 13 | Offline evaluation | Complete | Mocked-provider quality harness (~32 cases) |
+| 14 | Observability | Complete | Request correlation, latency/token/tool metrics, admin snapshot |
+| 15 | Latency & token efficiency | Complete | Output token caps verified, tool-def cache, parallel read-only tools |
 
-**Phase 12:** Not started.
+**Phase 12:** Complete — prompt injection guard (`promptGuard.ts`), in-memory per-user rate limiter (`aiRateLimiter.ts`), structured request metrics foundation (`aiRequestMetrics.ts`).
+
+**Phase 13:** Complete — offline evaluation harness under `tests/evaluation/ai/` (see [AI_EVALUATION.md](./AI_EVALUATION.md)).
+
+**Phase 14:** Complete — LLM observability and process-local aggregation (see section 15 below).
+
+**Phase 15:** Complete — backend latency/token micro-optimizations without API or frontend changes (see section 16 below).
+
+---
+
+## 15. LLM Observability & Monitoring
+
+Backend-only observability for `POST /api/v1/ai/chat`. Does not change AI behavior or the frontend contract.
+
+### What is tracked (per request)
+
+| Field | Description |
+|-------|-------------|
+| `requestId` | UUID correlating provider/tool logs for one AI request |
+| `provider` / `model` | From `AI_PROVIDER` / `AI_MODEL` |
+| `status` | `success`, `error`, `timeout`, `rate_limited`, `blocked` |
+| `errorCategory` | Safe bucket: `timeout`, `rate_limit`, `provider_error`, etc. |
+| `totalMs`, `providerMs`, `toolMs`, `overheadMs` | Latency breakdown (`overheadMs = max(0, total - provider - tool)`) |
+| `providerCallCount`, `toolCallCount`, `toolRounds` | Agent loop shape |
+| `tools[]` | Per-tool `callCount`, `totalMs`, `failureCount`, `averageMs` (no arguments) |
+| `promptTokens`, `completionTokens`, `totalTokens` | From provider usage when available; otherwise `null` |
+| `promptGuardBlocked`, `toolValidationFailures` | Security counters |
+
+Structured log event: `ai_chat_metrics` (JSON via `logAiRequestMetrics`).
+
+### Process-local aggregates
+
+`aiMetricsAggregator.ts` maintains bounded in-memory counters (resets on process restart):
+
+- Request success/failure/timeout/rate-limit/blocked counts
+- Average latency, provider latency, tool latency, tokens
+- Per-provider/model and per-tool aggregates (bounded key caps)
+
+Admin-only snapshot: `GET /api/v1/ai/metrics` (requires `role === 'admin'`). Returns aggregate counters only — no user or business data.
+
+### Intentionally NOT logged
+
+- API keys, authorization headers, cookies, JWTs
+- User prompts / AI responses
+- Tool arguments or returned business payloads
+- MongoDB documents or tenant secrets
+
+Safe even when `AI_DEBUG=true`.
+
+### Current limitation
+
+Metrics are **process-local** (no Redis/DB persistence). Suitable for dev and early production; external observability (Datadog, OpenTelemetry, etc.) can be added later when traffic justifies it.
+
+---
+
+## 16. Phase 15 — Latency & Token Efficiency
+
+Backend-only optimizations. **No frontend or API contract changes.** `POST /api/v1/ai/chat` still returns `{ success, data: { message } }` after the full agent loop completes.
+
+### What changed
+
+| Area | Change |
+|------|--------|
+| Output token caps | Verified via unit tests: `createLlmProvider` sends `max_tokens: 768` (env `AI_MAX_OUTPUT_TOKENS`) for `openai_compatible` / Groq; llama.cpp stays at `512` |
+| Tool definition cache | `registeredToolsToLlmDefinitions()` caches the 5-tool schema array at module level; invalidates automatically when the registry signature changes |
+| Parallel tool execution | Independent read-only tools in the same LLM round execute via `Promise.all` after dedupe; results mapped back in original `tool_calls` order |
+| Streaming | **Deferred** — frontend awaits a complete JSON body; SSE/chunked Groq responses would require frontend work or a buffer-then-respond pattern with no perceived gain |
+
+### What did NOT change
+
+- System prompt, tool descriptions, `AI_MAX_TOOL_ROUNDS` (3), `compressToolResult` limits
+- Auth, RBAC, tenant isolation, prompt guard, rate limiter
+- Phase 14 metrics fields (`providerMs`, `toolMs`, `totalMs`, tokens, tool stats)
+
+### Benchmark script
+
+`scripts/test-groq-ai-live.mjs` prints Phase 14-style metrics per prompt: `totalMs`, `providerMs`, `toolMs`, `providerCallCount`, `toolCallCount`, `toolRounds`, `totalTokens`.
+
+### Honest impact expectations
+
+For the common case (one tool call per request), **MongoDB/metrics latency dominates** `toolMs`. Parallel execution only helps when the model emits 2+ distinct tools in one round (uncommon with Groq `gpt-oss-20b`). Tool-definition caching saves microseconds per request.
 
 ---
 
@@ -423,4 +507,4 @@ Integration tests against live llama.cpp are **not** in the unit suite; local sm
 
 ---
 
-*Last aligned with codebase: Phases 6–11 complete. Configuration defaults from `src/ai/config/aiConfig.ts` and `.env.example`.*
+*Last aligned with codebase: Phases 6–15 complete. Configuration defaults from `src/ai/config/aiConfig.ts` and `.env.example`.*

@@ -16,10 +16,14 @@ import { LlmProviderError, LlmTimeoutError, LlmValidationError, LlmConfigError }
 import { baseContext } from '../tools/fixtures/mockTools.js';
 import { resetToolRegistryForTests } from '../../../../src/ai/tools/toolRegistry.js';
 import { ensureProductionToolsRegistered } from '../../../../src/ai/tools/business/registerProductionTools.js';
-import { registeredToolsToLlmDefinitions } from '../../../../src/ai/tools/llmToolBridge.js';
+import {
+  invalidateRegisteredToolDefinitionsCacheForTests,
+  registeredToolsToLlmDefinitions,
+} from '../../../../src/ai/tools/llmToolBridge.js';
 import { validateChatMessage } from '../../../../src/ai/chat/validateChatMessage.js';
 import { mapAiChatError } from '../../../../src/ai/chat/mapAiChatError.js';
 import { loadAiChatLimits } from '../../../../src/ai/chat/aiChatLimits.js';
+import { createAiRequestMetricsTracker } from '../../../../src/ai/chat/aiRequestMetrics.js';
 import { runAiChat } from '../../../../src/ai/chat/aiChatService.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -129,6 +133,7 @@ describe('mapAiChatError', () => {
 describe('runAiChat', () => {
   afterEach(() => {
     resetToolRegistryForTests();
+    invalidateRegisteredToolDefinitionsCacheForTests();
     vi.clearAllMocks();
   });
 
@@ -163,6 +168,43 @@ describe('runAiChat', () => {
     const registered = registeredToolsToLlmDefinitions().map((t) => t.function.name);
     expect(toolNames).toEqual(registered);
     expect(toolNames).toContain('getTodaySales');
+  });
+
+  it('records provider and tool metrics in the optional tracker', async () => {
+    vi.mocked(getTodaySales).mockResolvedValue({ date: '2026-08-27', total: 12500 });
+    ensureProductionToolsRegistered();
+    const tracker = createAiRequestMetricsTracker({ requestId: 'track-1' });
+
+    const provider = createMockProvider([
+      {
+        content: '',
+        toolCalls: [{
+          id: 'call_1',
+          type: 'function',
+          function: { name: 'getTodaySales', arguments: '{"tenantId":"evil"}' },
+        }],
+        usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+      },
+      {
+        content: 'Done',
+        toolCalls: [],
+      },
+    ]);
+
+    await runAiChat({
+      context: baseContext,
+      message: 'Sales today?',
+      provider,
+      metricsTracker: tracker,
+      requestId: 'track-1',
+    });
+
+    expect(tracker.providerCallCount).toBe(2);
+    expect(tracker.toolCallCount).toBe(1);
+    expect(tracker.toolRounds).toBe(1);
+    expect(tracker.toolValidationFailures).toBe(1);
+    expect(tracker.usage.totalTokens).toBe(15);
+    expect(tracker.toolObservations[0]?.toolName).toBe('getTodaySales');
   });
 
   it('executes getTodaySales through executeToolCall and returns final answer', async () => {
@@ -246,6 +288,60 @@ describe('runAiChat', () => {
         { label: 'Aug 27', value: 1200 },
       ],
     });
+  });
+
+  it('executes distinct tools in parallel within the same round', async () => {
+    vi.mocked(getTodaySales).mockImplementation(async () => {
+      await new Promise((resolve) => { setTimeout(resolve, 30); });
+      return { date: '2026-08-27', total: 12500 };
+    });
+    vi.mocked(getSalesTrend).mockImplementation(async () => {
+      await new Promise((resolve) => { setTimeout(resolve, 30); });
+      return [
+        { key: '2026-08-27', date: '2026-08-27', label: 'Aug 27', value: 1200 },
+      ];
+    });
+    ensureProductionToolsRegistered();
+
+    const provider = createMockProvider([
+      {
+        content: '',
+        toolCalls: [
+          {
+            id: 'call_sales',
+            type: 'function',
+            function: { name: 'getTodaySales', arguments: '{}' },
+          },
+          {
+            id: 'call_trend',
+            type: 'function',
+            function: { name: 'getSalesTrend', arguments: '{"range":"week"}' },
+          },
+        ],
+      },
+      {
+        content: 'Sales and trend combined.',
+        toolCalls: [],
+      },
+    ]);
+
+    const started = Date.now();
+    const result = await runAiChat({
+      context: baseContext,
+      message: 'Sales today and weekly trend',
+      provider,
+    });
+    const elapsedMs = Date.now() - started;
+
+    expect(result.message).toBe('Sales and trend combined.');
+    expect(getTodaySales).toHaveBeenCalledTimes(1);
+    expect(getSalesTrend).toHaveBeenCalledTimes(1);
+    expect(elapsedMs).toBeLessThan(80);
+
+    const toolMessages = provider.calls[1]?.messages.filter((m) => m.role === 'tool') ?? [];
+    expect(toolMessages).toHaveLength(2);
+    expect(toolMessages[0]?.toolCallId).toBe('call_sales');
+    expect(toolMessages[1]?.toolCallId).toBe('call_trend');
   });
 
   it('skips duplicate tool calls within the same request', async () => {
