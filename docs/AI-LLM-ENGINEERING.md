@@ -1,8 +1,10 @@
-# AI / LLM Engineering — Backend (Phases 6–11)
+# AI / LLM Engineering — Backend (Phases 6–17)
 
-Engineering documentation for the Toys Factory ERP backend AI assistant. This document covers work completed through **Phase 11**. It does **not** describe Phase 12 or later work.
+Engineering documentation for the Toys Factory ERP backend AI assistant. This document covers **implemented and verified** work through **Phase 17**.
 
-**Scope:** `toys_factory_erp_backend/` — all AI code lives under `src/ai/` plus the HTTP entry point in `src/controllers/aiChatController.ts`.
+**Scope:** `toys_factory_erp_backend/` — AI code lives under `src/ai/` plus HTTP entry points in `src/controllers/aiChatController.ts` and `src/controllers/aiMetricsController.ts`.
+
+**Frontend UI and proxy:** see [`toys_factory_erp/docs/AI-LLM-ENGINEERING.md`](../../toys_factory_erp/docs/AI-LLM-ENGINEERING.md) (Phase 11).
 
 ---
 
@@ -12,187 +14,106 @@ Engineering documentation for the Toys Factory ERP backend AI assistant. This do
 
 The ERP AI assistant lets authenticated users ask natural-language questions about business metrics (sales, revenue, dashboard KPIs, low stock). The LLM may call **read-only business tools** that reuse existing metrics services and dashboard data loaders. The assistant must not invent figures or mutate ERP data.
 
-### Current capabilities (Phase 11)
+### Current capabilities (Phases 6–17)
 
-- Opt-in LLM provider (`AI_ENABLED=true`)
-- OpenAI-compatible and local **llama.cpp** providers
-- Five production read-only tools: `getTodaySales`, `getSalesTrend`, `getRevenueTrend`, `getDashboardSummary`, `getLowStockCount`
-- Stateless chat API: `POST /api/v1/ai/chat`
-- Controlled multi-round tool loop (max rounds configurable)
-- Full auth, tenant resolution, and section RBAC on the chat route
+| Area | Status |
+| --- | --- |
+| Opt-in LLM provider (`AI_ENABLED=true`) | Implemented |
+| OpenAI-compatible provider (Groq in production) + local **llama.cpp** | Implemented |
+| Five read-only production tools | Implemented |
+| Stateless chat API (`POST /api/v1/ai/chat`) | Implemented — **no streaming** |
+| Controlled multi-round tool loop | Implemented |
+| Auth, tenant resolution, section RBAC | Implemented |
+| Prompt injection guard + per-user rate limiting | Implemented (process-local) |
+| Token/cost controls + tool-result compression | Implemented |
+| Process-local observability + admin metrics endpoint | Implemented |
+| Offline evaluation harness (mocked provider) | Implemented |
 
 ### Isolation from the normal ERP request path
 
-AI execution is **not** wired into standard CRUD, dashboard HTTP handlers, or middleware outside the dedicated chat route. Tools register lazily when AI chat runs; `ensureProductionToolsRegistered()` is **not** called from normal ERP HTTP paths. Business tools call existing **metrics services** (`src/services/metrics/`), which in turn use `dashboardDataLoader` and response cache — the same read paths as the dashboard, not duplicate Mongo access from the AI layer.
+AI execution is **not** wired into standard CRUD, dashboard HTTP handlers, or middleware outside the dedicated chat route. Tools register lazily when AI chat runs; `ensureProductionToolsRegistered()` is **not** called from normal ERP HTTP paths. Business tools call existing **metrics services** (`src/services/metrics/`), which use `dashboardDataLoader` and response cache — the same read paths as the dashboard, not duplicate Mongo access from the AI layer.
 
 ---
 
-## 2. Phase 6 — LLM Provider Foundation
+## 2. AI Architecture
 
-**Purpose:** Provider abstraction and HTTP normalization without adding a heavyweight SDK.
+### Request flow
 
-### Key paths
+```mermaid
+flowchart TD
+  User[User] --> FE[FrontendAiChatUI]
+  FE --> NX[NextJsAiRouteHandler]
+  NX --> API["POST /api/v1/ai/chat"]
+  API --> Auth[requireAuth_resolveTenant_sectionRBAC]
+  Auth --> Guard[PromptGuard_and_RateLimit]
+  Guard --> Ctrl[aiChatController]
+  Ctrl --> Svc[runAiChat]
+  Svc --> LLM[LLMProvider]
+  LLM -->|tool_calls| Tools[ToolRegistry_and_Executor]
+  Tools --> Metrics[MetricsServices_and_Cache]
+  Metrics --> Svc
+  LLM -->|final_text| Svc --> Ctrl --> NX --> FE
+```
+
+### End-to-end sequence
+
+1. **User request** — Frontend sends `{ message }` via authenticated API client.
+2. **AI controller** — `postAiChat` validates input, checks AI enabled, runs prompt guard and rate limiter.
+3. **Security / validation** — Prompt injection patterns blocked; message length capped; tenant from auth middleware.
+4. **AI chat service / orchestrator** — `runAiChat` builds messages, runs the agent loop, compresses tool results.
+5. **LLM provider** — `generateWithTools()` via OpenAI-compatible HTTP or llama.cpp.
+6. **Tool execution** — When the model emits `tool_calls`, tools run through the registry/executor with RBAC.
+7. **Final response** — Trimmed text returned as `{ success: true, data: { message } }`.
+
+### ERP integration boundary
+
+The AI layer integrates with the existing ERP backend **without changing the frontend contract**:
+
+- Same auth stack (`requireAuth`, `resolveTenant`, `requireSectionAccess`).
+- Same `{ success, data }` response envelope as other ERP endpoints.
+- Tools reuse metrics services — no new database schemas or CRUD routes for AI.
+- AI runs only on explicit `POST /api/v1/ai/chat` — no AI on dashboard page load or CRUD.
+
+### Security boundaries
+
+| Rule | Status |
+| --- | --- |
+| AI business tools → direct HTTP to ERP routes | **NO** |
+| AI tool layer → MongoDB directly | **NO** |
+| LLM controls `tenantId` | **NO** |
+| RBAC bypass | **NO** |
+| Mutation / write tools | **NO** |
+
+### Key file paths
 
 | Area | Path |
-|------|------|
+| --- | --- |
 | Module root | `src/ai/` |
-| Config | `src/ai/config/aiConfig.ts` |
-| Client / singleton | `src/ai/client/llmClient.ts` |
-| Provider factory | `src/ai/providers/createProvider.ts` |
-| OpenAI-compatible | `src/ai/providers/openaiCompatibleProvider.ts` |
-| llama.cpp | `src/ai/providers/llamaCppProvider.ts` |
-| HTTP normalization | `src/ai/providers/httpChatCompletions.ts` |
-| Types / errors | `src/ai/types.ts`, `src/ai/errors.ts` |
-
-### LLMProvider abstraction
-
-`LLMProvider` exposes:
-
-- `generate(input, options?)` — text completion
-- `generateWithTools(input, options?)` — chat completion with tool definitions and `tool_calls` passthrough
-
-Both providers delegate to `postChatCompletions()` in `httpChatCompletions.ts`.
-
-### Design decisions
-
-- **Native `fetch`** — no axios or OpenAI SDK; keeps dependencies minimal and matches Node 20+.
-- **Lazy singleton** — `getLlmProvider()` caches one provider instance per process (`resetLlmProviderForTests()` for tests). Config is read at first use; restart the server after `.env` changes.
-- **Normalized responses** — provider layer maps OpenAI-style JSON to `content`, `finishReason`, `usage`, and `toolCalls[]`.
-- **Per-request AbortController** — `mergeAbortSignals()` in `httpChatCompletions.ts` enforces `timeoutMs` from config (default **180000** ms unless overridden).
-
-### Environment variables (`.env.example`)
-
-| Variable | Default / notes |
-|----------|-----------------|
-| `AI_ENABLED` | `false` — **opt-in**; when not `true`, chat returns **503** |
-| `AI_PROVIDER` | `llama_cpp` or `openai_compatible` |
-| `AI_BASE_URL` | `http://127.0.0.1:8080/v1` (llama) or `https://api.openai.com/v1` |
-| `AI_MODEL` | `Qwen/Qwen3-1.7B-GGUF` (llama default) or `gpt-4o-mini` (OpenAI default) |
-| `AI_API_KEY` | Required for `openai_compatible` unless `AI_ALLOW_MISSING_KEY=true` |
-| `AI_TIMEOUT_MS` | **180000** (ms) |
-| `AI_ALLOW_MISSING_KEY` | `false` |
-| `AI_DEBUG` | `false` — logs `[ai] POST …` when true |
-
-When `AI_ENABLED` is not true, `loadAiConfig()` returns `{ enabled: false }` and the chat controller rejects before any provider call.
-
-### llama.cpp-specific runtime options (Phase 11 fix)
-
-For `llama_cpp` only, `createProvider.ts` adds:
-
-- `maxTokens: 512`
-- `chatTemplateKwargs: { enable_thinking: false }` — required for Qwen3 tool calling (see §9)
+| Chat controller | `src/controllers/aiChatController.ts` |
+| Metrics controller | `src/controllers/aiMetricsController.ts` |
+| Chat service | `src/ai/chat/aiChatService.ts` |
+| Config | `src/ai/config/aiConfig.ts`, `src/ai/chat/aiChatLimits.ts` |
+| Routes | `src/routes/api.routes.ts` |
 
 ---
 
-## 3. Phase 7 — Tool Registry + Function Calling Foundation
+## 3. Current API Contract
 
-**Purpose:** Allowlisted, validated, RBAC-gated tool execution — never raw LLM → Mongo/HTTP.
+### `POST /api/v1/ai/chat`
 
-### Key paths
-
-| Area | Path |
-|------|------|
-| Registry | `src/ai/tools/toolRegistry.ts` |
-| Executor | `src/ai/tools/toolExecutor.ts` |
-| LLM bridge | `src/ai/tools/llmToolBridge.ts` |
-| Schema validation | `src/ai/tools/schemas.ts` |
-| Forbidden args | `src/ai/tools/forbiddenArgs.ts` |
-| Authorization | `src/ai/tools/authorization.ts` |
-| Execution context | `src/ai/context/buildAiContext.ts` |
-
-### Allowlist model
-
-- Tools are registered by name in an in-memory `Map` (`registerTool`, `getTool`, `listTools`).
-- Unknown tool names → structured failure (`ToolNotFoundError`), not execution.
-- Duplicate registration throws `ToolDuplicateNameError`.
-
-### `executeToolCall(context, toolCall)`
-
-Single entry point for all tool runs:
-
-1. Parse JSON arguments; reject invalid JSON
-2. Reject **forbidden keys** (`tenantId`, `userId`, `role`, `token`, `apiKey`, etc.) via `findForbiddenArgKeys()`
-3. Validate against tool `inputSchema`
-4. Check RBAC via `userCanExecuteTool()`
-5. Call `tool.execute(context, validatedArgs)`
-6. Return `ToolExecutionResult` (`ok: true` with `data`, or `ok: false` with sanitized `error`) — **does not throw** for tool-level failures; errors are fed back to the LLM as tool messages
-
-### `executeLlmToolCalls()`
-
-Batch helper in `llmToolBridge.ts` for multiple tool calls in one round.
-
-### Fail-closed behavior
-
-- Missing tool, bad schema, forbidden args, or RBAC denial → tool result with `ok: false`; no bypass.
-- Tenant ID always comes from `AiExecutionContext`, built from authenticated request — **never** from LLM arguments.
-
-### No direct Mongo / ERP HTTP from tools layer
-
-Business tools import **metrics service functions** only. They do not use mongoose models, `fetch` to ERP routes, `eval`, or `new Function`.
-
----
-
-## 4. Phase 8 — First Production Business Tool
-
-**Tool:** `getTodaySales` — `src/ai/tools/business/getTodaySalesTool.ts`
-
-### Behavior
-
-- Calls `getTodaySales({ tenantId: context.tenantId })` from `src/services/metrics/salesMetrics.ts`
-- Metrics layer uses `dashboardDataLoader` (same cache/loader path as dashboard APIs)
-- Business date: Asia/Dhaka calendar (via metrics layer)
-- **RBAC:** `requiredSections: ['dashboard']`
-
-### Example tool result shape (success)
-
-```json
-{
-  "date": "2026-08-27",
-  "sales": 12500
-}
-```
-
-### Tool execution flow
-
-```
-LLM tool_call(getTodaySales)
-  → executeToolCall()
-  → getTodaySalesTool.execute(context)
-  → salesMetrics.getTodaySales({ tenantId })
-  → dashboardDataLoader / cache
-  → JSON tool message back to LLM
-```
-
----
-
-## 5. Phase 9 — AI Chat API + Controlled Agent Loop
-
-**Route:** `POST /api/v1/ai/chat` — registered in `src/routes/api.routes.ts`, handler `src/controllers/aiChatController.ts`
-
-### Middleware chain (existing ERP stack)
-
-```
-requireAuth → resolveTenant → requireSectionAccess → postAiChat
-```
-
-- **`/ai` prefix** maps to **`dashboard`** section in `src/config/apiSectionMap.ts` — user needs dashboard access to use AI chat.
-- **Tenant:** `getRequestTenantId(req)` after `resolveTenant`; body/query `tenantId` mismatch → **403**.
-
-### Request / response contract
+**Middleware:** `requireAuth` → `resolveTenant` → `requireSectionAccess` (`/ai` maps to `dashboard` section in `src/config/apiSectionMap.ts`).
 
 **Request:**
 
-```http
-POST /api/v1/ai/chat
-Content-Type: application/json
-Cookie: token=…   (or Authorization: Bearer …)
-
-{ "message": "আজকের sales কত?" }
+```json
+{
+  "message": "What were today's sales?"
+}
 ```
 
-Only `message` is accepted. No `tenantId`, `userId`, or role in the body.
+Only `message` is accepted. No `tenantId`, `userId`, or role in the body. Max length: `AI_MAX_MESSAGE_LENGTH` (default **4000**).
 
-**Success response:**
+**Success response (200):**
 
 ```json
 {
@@ -203,121 +124,123 @@ Only `message` is accepted. No `tenantId`, `userId`, or role in the body.
 }
 ```
 
-**Error mapping** (`src/ai/chat/mapAiChatError.ts`):
+**Prompt-guard blocked (200, not an error):**
 
-| Condition | HTTP |
-|-----------|------|
-| AI disabled | 503 |
-| Validation (empty/long message) | 400 |
-| Unauthorized | 401 |
-| Tool round limit | 429 |
-| LLM timeout | 504 |
-| Provider error | 502 |
-| Unmapped exception | 500 (sanitized message) |
-
-Provider/config messages are sanitized (Bearer tokens, `sk-…` patterns redacted).
-
-### Agent loop (`src/ai/chat/aiChatService.ts`)
-
-1. Build message list with user message + system prompt (`ERP_AI_SYSTEM_PROMPT`)
-2. Call `llm.generateWithTools()` with all registered tools, `toolChoice: 'auto'`
-3. If no `toolCalls` → return trimmed `content` (or fallback string)
-4. If `toolCalls` → append assistant message (with `toolCalls`) + tool result messages → loop
-5. Stop when `toolRounds > maxToolRounds` → **429**
-
-**Limits** (`src/ai/chat/aiChatLimits.ts`):
-
-| Env | Default |
-|-----|---------|
-| `AI_MAX_TOOL_ROUNDS` | 3 |
-| `AI_MAX_MESSAGE_LENGTH` | 4000 |
-
-### Message serialization
-
-`httpChatCompletions.ts` `buildMessages()` serializes:
-
-- `system` → system message
-- `user` / `assistant` / `tool` roles
-- Assistant replay: `tool_calls` array
-- Tool results: `tool_call_id` + JSON string `content`
-
-### Stateless design
-
-No conversation ID, no server-side chat history, no MongoDB persistence. Each request is independent; multi-turn context exists only within a single request’s tool loop.
-
----
-
-## 6. Phase 10 — Production ERP Business Tools
-
-All registered in `src/ai/tools/business/registerProductionTools.ts` as `PRODUCTION_TOOLS`.
-
-| Tool | Metrics service | RBAC section | Args |
-|------|-----------------|--------------|------|
-| `getTodaySales` | `salesMetrics.getTodaySales` | `dashboard` | none |
-| `getSalesTrend` | `salesMetrics.getSalesTrend` | `dashboard` | `range`: day/week/month/quarter/year |
-| `getRevenueTrend` | `salesMetrics.getRevenueTrend` | `dashboard` | `range` |
-| `getDashboardSummary` | `dashboardMetrics.getDashboardSummaryMetrics` | `dashboard` | optional `scope`: kpi/extra/full |
-| `getLowStockCount` | `inventoryMetrics.getLowStockCount` | `inventory` | none |
-
-Shared JSON schemas: `src/ai/tools/business/sharedToolSchemas.ts`
-
-**No mutation tools** — all tools are read-only aggregations.
-
-**Tenant isolation** — every `execute()` receives `context.tenantId` from auth; metrics functions always filter by that tenant.
-
----
-
-## 7. Phase 11 — Frontend Integration (backend-facing)
-
-The Phase 11 UI calls this API only:
-
-- **Endpoint:** `POST /api/v1/ai/chat` (via Next.js route handler — see frontend doc)
-- **Auth:** Existing session cookie / Bearer token; no API keys in the browser
-- **Body:** `{ message }` only
-- **Lazy execution:** Backend LLM runs only when the chat endpoint is hit; no background AI jobs
-
-Backend remains authoritative for tenant, RBAC, tool allowlist, and metrics data.
-
----
-
-## 8. Current AI Architecture
-
-```mermaid
-flowchart TD
-  FE[Frontend AI Chat UI]
-  NX[Next.js route handler\nweb/app/api/v1/ai/chat/route.ts]
-  API[POST /api/v1/ai/chat]
-  AUTH[requireAuth + resolveTenant + requireSectionAccess]
-  CTRL[aiChatController]
-  SVC[runAiChat / aiChatService]
-  LLM[LLMProvider\nllama_cpp or openai_compatible]
-  TOOLS[Tool Registry + executeToolCall]
-  BIZ[Business Tools]
-  MET[Metrics / dashboardDataLoader / cache]
-  FE --> NX --> API --> AUTH --> CTRL --> SVC --> LLM
-  LLM -->|tool_calls| TOOLS --> BIZ --> MET
-  MET -->|tool JSON| SVC --> LLM
-  LLM -->|final content| SVC --> CTRL --> NX --> FE
+```json
+{
+  "success": true,
+  "data": {
+    "message": "<refusal message>"
+  }
+}
 ```
 
-### Security boundaries (explicit)
+Refusal text from `src/ai/chat/promptGuard.ts` (`REFUSAL_MESSAGE`).
 
-| Rule | Status |
-|------|--------|
-| AI business tools → direct HTTP to ERP routes | **NO** |
-| AI tool layer → MongoDB directly | **NO** |
-| LLM controls `tenantId` | **NO** |
-| RBAC bypass | **NO** |
-| Mutation / write tools | **NO** |
+**Error responses:**
+
+```json
+{
+  "success": false,
+  "message": "…"
+}
+```
+
+| Condition | HTTP | Client message |
+| --- | --- | --- |
+| AI disabled | 503 | `"AI Assistant is currently unavailable."` |
+| Validation (empty/long message) | 400 | validation message |
+| Unauthorized | 401 | `"Unauthorized"` |
+| Rate limit / tool round limit | 429 | `"AI service is temporarily busy. Please try again shortly."` |
+| LLM timeout | 504 | `"AI service is taking too long. Please try again."` |
+| Provider error | 502 | `"AI service is temporarily unavailable."` |
+| Unmapped exception | 500 | `"Internal server error"` (sanitized) |
+
+**Not supported:** streaming (SSE/chunked), conversation IDs, server-side chat history.
+
+### `GET /api/v1/ai/metrics`
+
+**Auth:** Requires authenticated user with `role === 'admin'` (403 otherwise).
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "aiEnabled": true,
+    "metrics": { "…aggregate counters…" }
+  }
+}
+```
+
+Returns **process-local aggregate metrics only** — no prompts, responses, secrets, tool arguments, or business data. Counters reset on process restart.
 
 ---
 
-## 9. llama.cpp / Qwen Runtime Notes
+## 4. Provider Architecture
 
-Current intended local stack (from `.env.example` and `createProvider.ts`):
+### Why provider abstraction exists
+
+The `LLMProvider` interface decouples the agent loop from any single vendor. The same tool-calling orchestration works with:
+
+- **Hosted OpenAI-compatible APIs** (Groq, OpenAI, etc.) via `openai_compatible`
+- **Local llama.cpp** via `llama_cpp`
+
+Both providers delegate to `postChatCompletions()` in `src/ai/providers/httpChatCompletions.ts` using native `fetch` (no OpenAI SDK).
+
+### Provider types
+
+| Provider ID | Implementation | HTTP endpoint |
+| --- | --- | --- |
+| `openai_compatible` | `openaiCompatibleProvider.ts` | `POST {baseUrl}/chat/completions` |
+| `llama_cpp` | `llamaCppProvider.ts` | Same HTTP layer; adds `chatTemplateKwargs: { enable_thinking: false }` |
+
+There is no separate `groq` provider class. **Groq is used as an `openai_compatible` deployment** — see `.env.example` and recommended production config below.
+
+### LLMProvider interface
+
+- `generate(input, options?)` — text completion
+- `generateWithTools(input, options?)` — chat completion with tool definitions and `tool_calls` passthrough
+
+### Design decisions
+
+- **Native `fetch`** — minimal dependencies; Node 20+.
+- **Lazy singleton** — `getLlmProvider()` caches one provider per process (`resetLlmProviderForTests()` for tests). Restart the server after `.env` changes.
+- **Normalized responses** — maps OpenAI-style JSON to `content`, `finishReason`, `usage`, and `toolCalls[]`.
+- **Per-request AbortController** — `timeoutMs` from config enforced via `mergeAbortSignals()`.
+
+### Environment variables
+
+| Variable | Default / notes |
+| --- | --- |
+| `AI_ENABLED` | `false` — opt-in; when not `true`, chat returns **503** |
+| `AI_PROVIDER` | `openai_compatible` or `llama_cpp` |
+| `AI_BASE_URL` | `https://api.openai.com/v1` or `http://127.0.0.1:8080/v1` |
+| `AI_MODEL` | `gpt-4o-mini` (OpenAI default) or `Qwen/Qwen3-1.7B-GGUF` (llama) |
+| `AI_API_KEY` | Required for `openai_compatible` unless `AI_ALLOW_MISSING_KEY=true` |
+| `AI_TIMEOUT_MS` | **180000** ms default; **60000** recommended for Groq |
+| `AI_ALLOW_MISSING_KEY` | `false` |
+| `AI_DEBUG` | `false` — logs `[ai] POST …` when true |
+| `AI_MAX_OUTPUT_TOKENS` | **768** (openai_compatible) |
+| `AI_LLAMA_MAX_OUTPUT_TOKENS` | **512** (llama.cpp) |
+
+### Recommended production configuration (Groq)
+
+```text
+AI_ENABLED=true
+AI_PROVIDER=openai_compatible
+AI_BASE_URL=https://api.groq.com/openai/v1
+AI_MODEL=openai/gpt-oss-20b
+AI_TIMEOUT_MS=60000
+```
+
+Live smoke script: `scripts/test-groq-ai-live.mjs`.
+
+### llama.cpp / Qwen runtime notes
 
 | Setting | Value |
-|---------|--------|
+| --- | --- |
 | Provider | `llama_cpp` |
 | Base URL | `http://127.0.0.1:8080/v1` |
 | Model | `Qwen/Qwen3-1.7B-GGUF` |
@@ -325,81 +248,350 @@ Current intended local stack (from `.env.example` and `createProvider.ts`):
 | llama `max_tokens` | **512** (hardcoded for llama provider) |
 | Qwen thinking | **`enable_thinking: false`** via `chat_template_kwargs` |
 
-### Lessons learned
+**Lessons learned:**
 
 1. **Qwen3 thinking mode** — Without `enable_thinking: false`, the model may consume tokens in internal reasoning and fail to return `tool_calls` or visible `content` within timeout.
-2. **High latency** — Local CPU inference commonly takes **~70–170+ seconds** per chat request (tool loop = multiple LLM round-trips). This is environment-dependent, not a guaranteed SLA.
-3. **Next.js rewrite ~30s limit** — The generic rewrite in `next.config.ts` (`/api/v1/:path*` → backend) uses a **~30 second proxy timeout** in dev. AI requests exceeding that returned HTTP **500** / connection reset **before** the backend finished. **Fix (Phase 11):** dedicated Next.js route handler at `web/app/api/v1/ai/chat/route.ts` with **190000 ms** proxy timeout (documented in frontend AI doc).
+2. **High latency** — Local CPU inference commonly takes **~70–170+ seconds** per chat request (tool loop = multiple LLM round-trips). Environment-dependent, not a guaranteed SLA.
+3. **Next.js proxy timeout** — Generic rewrite has ~30s limit. Frontend uses dedicated route handler at `web/app/api/v1/ai/chat/route.ts` with **190000 ms** timeout (see frontend AI doc).
 4. **Model ID** — `AI_MODEL` must match the model exposed by llama.cpp `/v1/models`.
 
-Performance tuning (faster model, GPU, streaming) remains **future work**.
+---
+
+## 5. Tool Calling
+
+### Architecture
+
+```text
+LLM emits tool_calls
+  → aiChatService agent loop
+  → dedupe cache lookup (canonical JSON key)
+  → parallel executeToolCall (uncached, read-only)
+  → compressToolResult
+  → tool message back to LLM
+  → next round or final answer
+```
+
+### Tool registry
+
+- Location: `src/ai/tools/toolRegistry.ts` — in-memory `Map<string, ToolDefinition>`.
+- Unknown tool names → structured failure (`ToolNotFoundError`), not execution.
+- Duplicate registration throws `ToolDuplicateNameError`.
+- Production bootstrap: `src/ai/tools/business/registerProductionTools.ts` (idempotent).
+
+### LLM tool definitions
+
+- Bridge: `src/ai/tools/llmToolBridge.ts` — `registeredToolsToLlmDefinitions()`.
+- **Module-level cache** keyed by tool-name signature; invalidates when registry changes (Phase 15).
+
+### Tool execution pipeline (`executeToolCall`)
+
+1. Parse JSON arguments; reject invalid JSON
+2. Reject **forbidden keys** via `findForbiddenArgKeys()` (including nested arrays)
+3. Validate against tool `inputSchema`
+4. Check RBAC via `userCanExecuteTool()`
+5. Call `tool.execute(context, validatedArgs)`
+6. Return `ToolExecutionResult` — does **not throw** for tool-level failures; errors feed back to the LLM
+
+Tenant ID always comes from `AiExecutionContext` (auth middleware) — **never** from LLM arguments.
+
+### Production read-only tools
+
+| Tool | Metrics service | RBAC section | Args |
+| --- | --- | --- | --- |
+| `getTodaySales` | `salesMetrics.getTodaySales` | `dashboard` | none |
+| `getSalesTrend` | `salesMetrics.getSalesTrend` | `dashboard` | `range`: day/week/month/quarter/year |
+| `getRevenueTrend` | `salesMetrics.getRevenueTrend` | `dashboard` | `range` |
+| `getDashboardSummary` | `dashboardMetrics.getDashboardSummaryMetrics` | `dashboard` | optional `scope`: kpi/extra/full |
+| `getLowStockCount` | `inventoryMetrics.getLowStockCount` | `inventory` | none |
+
+**No mutation tools.** Business tools import metrics service functions only — no mongoose models, no `fetch` to ERP routes, no `eval`.
+
+### Agent loop controls
+
+| Control | Default | Env var |
+| --- | --- | --- |
+| Max tool rounds | 3 | `AI_MAX_TOOL_ROUNDS` |
+| Max message length | 4000 | `AI_MAX_MESSAGE_LENGTH` |
+| Max tool result chars | 8000 | `AI_MAX_TOOL_RESULT_CHARS` |
+
+### Duplicate tool-call handling
+
+- Per-request `toolResultCache` keyed by `toolName + stableToolArgsKey(args)`.
+- **Canonical JSON deduplication** (Phase 16) — whitespace/key-order variants share one cache entry.
+- Duplicate calls in the same round skip re-execution (`skippedDuplicate: true` in metrics).
+
+### Parallel execution
+
+Independent read-only tools in the same LLM round execute via `Promise.all` after dedupe (Phase 15). Results map back in original `tool_calls` order. Tool messages use the current LLM `tool_calls[i].id` for follow-up round correlation (Phase 16).
+
+### Tool result compression
+
+`src/ai/chat/compressToolResult.ts`:
+
+- Trend tools compressed to `{ range, total, peak, points }`.
+- All results truncated via `truncateJson()` to `AI_MAX_TOOL_RESULT_CHARS`.
+- Errors compressed to `{ error: … }`; large payloads marked `truncated: true`.
+
+### Stateless design
+
+No conversation ID, no server-side chat history, no MongoDB persistence. Multi-turn context exists only within a single request's tool loop.
 
 ---
 
-## 10. Security Model
+## 6. Security Engineering
 
-- **API keys** — `AI_API_KEY` env only; never sent to frontend or returned in errors
-- **Tenant** — `resolveTenant` + `getRequestTenantId(req)`; LLM cannot supply tenant
-- **Forbidden tool args** — `forbiddenArgs.ts` blocks identity/RBAC/credential keys in tool JSON
-- **RBAC** — `userCanExecuteTool()` mirrors section access; admin bypasses section checks
-- **Error sanitization** — `mapAiChatError.ts` redacts Bearer/sk- patterns
-- **No** `eval` / `new Function` in AI module
-- **No** mongoose in `src/ai/tools/business/*`
-- **Diagnostic logs** — `[AI_CHAT]` console logs in controller/service record lifecycle only (no prompts, cookies, JWTs, or API keys)
+### Application-level security
+
+| Control | Implementation |
+| --- | --- |
+| Authentication | `requireAuth` — JWT from HttpOnly cookie or Bearer token |
+| Tenant isolation | `resolveTenant` + `getRequestTenantId(req)`; body/query `tenantId` mismatch → 403 |
+| Section RBAC | `/ai` requires `dashboard` section access (`apiSectionMap.ts`) |
+| Admin-only metrics | `GET /api/v1/ai/metrics` requires `role === 'admin'` |
+
+### AI-specific security
+
+| Control | Implementation |
+| --- | --- |
+| Prompt injection guard | `src/ai/chat/promptGuard.ts` — 11 regex patterns (ignore instructions, reveal system prompt, reveal API key, bypass permissions, act as admin, etc.) |
+| System prompt appendix | `ERP_AI_SECURITY_APPENDIX` appended to system prompt |
+| Opt-in AI | `AI_ENABLED` must be `true`; otherwise 503 before any provider call |
+| API keys | `AI_API_KEY` env only; never sent to frontend or returned in errors |
+
+Prompt guard runs **before** the LLM call. Blocked requests return HTTP 200 with a refusal message (not an error).
+
+### Tool-level security
+
+| Control | Implementation |
+| --- | --- |
+| Forbidden tool arguments | `forbiddenArgs.ts` — blocks `tenantId`, `tenant_id`, `userId`, `user_id`, `role`, `token`, `apiKey`, `password`, `secret`, etc. |
+| Nested array validation | Recursive traversal of tool argument objects and arrays (Phase 16) |
+| Schema validation | Per-tool `inputSchema` in `schemas.ts` |
+| RBAC per tool | `authorization.ts` — admin bypass; otherwise checks `requiredSections` / `requiredPermissions` |
+| Read-only tools only | No mutation/write tools registered |
+
+### Logging and error handling
+
+| Rule | Status |
+| --- | --- |
+| No API key / prompt / response logging | Enforced |
+| No tool-argument / business payload logging | Enforced |
+| Sanitized server-side error logs | `sanitizeServerLogMessage()` redacts Bearer tokens, `sk-*` patterns |
+| Safe client-facing errors | Generic messages via `mapAiChatError.ts` |
+| No `eval` / `new Function` in AI module | Enforced |
+
+Structured log event `ai_chat_metrics` records lifecycle metrics only — safe even when `AI_DEBUG=true`.
+
+### Rate limiting
+
+- Location: `src/ai/chat/aiRateLimiter.ts`
+- **Process-local** sliding window (`Map<userId, timestamps[]>`)
+- Default: **30 requests/minute** per user (`AI_RATE_LIMIT_PER_MIN`)
+- Toggle: `AI_RATE_LIMIT_ENABLED` (default `true`)
+- Expired idle entries evicted on next access (Phase 16)
+- Throws `ApiError(429)` → friendly client message
+
+**Known limitation:** Prompt guard is regex-based — sophisticated obfuscation may bypass it. Semantic prompt-injection defense is **deferred**.
 
 ---
 
-## 11. Testing
+## 7. Cost & Token Optimization
 
-### Counts (verified from repository)
+Goal: control unnecessary LLM usage and latency. **No measured cost-savings percentages are claimed** — these are implemented controls.
+
+| Control | Value | Location |
+| --- | --- | --- |
+| Output token cap (openai_compatible) | 768 | `AI_MAX_OUTPUT_TOKENS` / `createProvider.ts` |
+| Output token cap (llama.cpp) | 512 | `AI_LLAMA_MAX_OUTPUT_TOKENS` / `createProvider.ts` |
+| Tool result character limit | 8000 | `AI_MAX_TOOL_RESULT_CHARS` |
+| Max tool rounds | 3 | `AI_MAX_TOOL_ROUNDS` |
+| Per-user rate limit | 30/min | `AI_RATE_LIMIT_PER_MIN` |
+| Concise system prompt | Once per request | `aiChatService.ts` |
+| Shorter tool descriptions | In LLM definitions | `llmToolBridge.ts` |
+| Tool definition cache | Module-level | `llmToolBridge.ts` (Phase 15) |
+| Duplicate tool-call deduplication | Per-request cache | `aiChatService.ts` |
+| Canonical JSON dedupe keys | Normalized args | `aiChatService.ts` (Phase 16) |
+| Tool result compression | Trend rollup + truncate | `compressToolResult.ts` |
+| Context filtering | Empty messages filtered; no conversation history | `aiChatService.ts` |
+
+For the common case (one tool call per request), **MongoDB/metrics latency dominates** `toolMs`. Parallel execution helps when the model emits 2+ distinct tools in one round.
+
+---
+
+## 8. Observability (Phase 14)
+
+Backend-only observability for `POST /api/v1/ai/chat`. Does not change AI behavior or the frontend contract.
+
+### Per-request metrics (`aiRequestMetrics.ts`)
+
+| Field | Description |
+| --- | --- |
+| `requestId` | UUID correlating provider/tool logs |
+| `provider` / `model` | From `AI_PROVIDER` / `AI_MODEL` |
+| `status` | `success`, `error`, `timeout`, `rate_limited`, `blocked` |
+| `errorCategory` | Safe bucket: `timeout`, `rate_limit`, `provider_error`, etc. |
+| `totalMs`, `providerMs`, `toolMs`, `overheadMs` | Latency breakdown |
+| `providerCallCount`, `toolCallCount`, `toolRounds` | Agent loop shape |
+| `tools[]` | Per-tool `callCount`, `totalMs`, `failureCount`, `averageMs` (no arguments) |
+| `promptTokens`, `completionTokens`, `totalTokens` | From provider usage when available; otherwise `null` |
+| `promptGuardBlocked`, `toolValidationFailures` | Security counters |
+
+Structured log: `ai_chat_metrics` (JSON via `logAiRequestMetrics()`).
+
+### Process-local aggregates (`aiMetricsAggregator.ts`)
+
+Bounded in-memory counters (resets on process restart):
+
+- Request success/failure/timeout/rate-limit/blocked counts
+- Average latency, provider latency, tool latency, tokens
+- Per-provider/model breakdown (max 16 keys)
+- Per-tool aggregates (max 32 keys)
+
+### Admin metrics endpoint
+
+`GET /api/v1/ai/metrics` — admin-only, returns `AiMetricsSnapshot`. **No prompts, responses, secrets, or business data exposed.**
+
+Metrics emission wrapped in try/catch in controller `finally` block — metrics failures cannot mask request errors (Phase 16).
+
+### Benchmark script
+
+`scripts/test-groq-ai-live.mjs` prints per-prompt metrics: `totalMs`, `providerMs`, `toolMs`, `providerCallCount`, `toolCallCount`, `toolRounds`, `totalTokens`.
+
+---
+
+## 9. Reliability & Error Handling (Phases 16–17)
+
+| Protection | Implementation |
+| --- | --- |
+| Provider timeout | `AbortController` + `LlmTimeoutError` → HTTP 504 |
+| Malformed provider 200 | Non-JSON body, missing `choices`, invalid `tool_calls` → `LlmProviderError` (502) |
+| Non-string provider content | `normalizeProviderText()` treats non-string `content`/`reasoning` as empty (Phase 17) |
+| Empty response fallback | Whitespace-only content → fallback string |
+| `[object Object]` protection | `normalizeFinalAnswer()` rejects before returning to client (Phase 17) |
+| Provider error mapping | Friendly client messages; sanitized server logs |
+| Tool-round limit | Exceeding `AI_MAX_TOOL_ROUNDS` → 429 with busy message |
+| Rate-limit handling | Same friendly 429 message as tool-round limit |
+| Metrics fault isolation | `finally` block try/catch in controller |
+| No provider retries | Intentionally none — retries could duplicate tool execution |
+
+GPT-OSS reasoning field preserved — only used when content is blank **and** there are no tool calls.
+
+---
+
+## 10. Evaluation Framework (Phase 13)
+
+Offline evaluation harness under `tests/evaluation/ai/`. Uses **mocked LLM provider** — no live API calls.
+
+**Documentation:** [AI_EVALUATION.md](./AI_EVALUATION.md)
+
+### Dataset (32 cases, 8 categories)
+
+| Dataset | Cases | Focus |
+| --- | ---: | --- |
+| `simple-factual.ts` | 4 | Basic factual responses |
+| `time-range.ts` | 4 | Date/range handling |
+| `tool-selection.ts` | 4 | Correct tool choice |
+| `tool-args.ts` | 4 | Argument validation |
+| `agent-loop.ts` | 4 | Multi-round tool loops |
+| `security.ts` | 5 | Prompt injection, forbidden args |
+| `ambiguous.ts` | 3 | Ambiguous queries |
+| `errors.ts` | 4 | Error handling paths |
+
+### Test commands
+
+```bash
+npm run test:ai-eval          # all 32 cases via evaluation.report.test.ts
+npx vitest run --project evaluation
+```
+
+Evaluation project: **18 tests** across 5 files (category-specific + full report).
+
+**Important:** Mocked evaluation measures harness behavior and tool-selection logic — it is **not** live production accuracy or user satisfaction.
+
+---
+
+## 11. Redis & Process-Local Storage
+
+### ERP Redis (separate from AI)
+
+The ERP backend supports optional Redis for **server-side GET response caching** when `REDIS_URL` is configured:
+
+- `src/lib/redisClient.ts` — connection management
+- `src/middleware/responseCache.ts` — dashboard/report GET caching
+- `GET /health` reports Redis status
+
+If `REDIS_URL` is empty, an in-memory `Map` fallback is used (lost on process restart).
+
+### AI layer — entirely process-local
+
+**Redis is NOT used by the AI layer.** Grep of `src/ai/` finds zero Redis references.
+
+| AI component | Storage |
+| --- | --- |
+| Rate limiter | In-memory `Map` (`aiRateLimiter.ts`) |
+| Metrics aggregator | In-memory counters (`aiMetricsAggregator.ts`) |
+| Tool registry | In-memory `Map` (`toolRegistry.ts`) |
+| LLM provider singleton | Module-level variable (`llmClient.ts`) |
+| Tool definition cache | Module-level cache (`llmToolBridge.ts`) |
+| Per-request tool result cache | `Map` in `runAiChat()` |
+
+**Redis is NOT currently required by the AI layer.** Distributed Redis-backed AI rate limiting and metrics is a **future scaling option**, not current implementation.
+
+---
+
+## 12. Testing
+
+### Verified counts (repository run)
 
 | Scope | Result |
-|-------|--------|
-| All unit tests (`npx vitest run --project unit`) | **216 passed** (35 files) |
-| AI unit tests (`tests/unit/ai/**`) | **118 passed** (20 files) |
+| --- | --- |
+| All unit tests (`npx vitest run --project unit`) | **271 passed** (43 files) |
+| AI unit tests (`tests/unit/ai/**`) | **173 passed** (28 files) |
+| AI evaluation (`npm run test:ai-eval`) | **18 passed** (5 files; 32 eval cases) |
 
-### AI test coverage includes
+### AI unit test coverage includes
 
-- `aiConfig`, `llmClient`, `createProvider`, `llamaCppProvider`, `openaiCompatibleProvider`
-- `aiChatService`, `aiChatController`, `aiContext`
-- `toolRegistry`, `toolExecutor`, `authorization`, `forbiddenArgs`, `schemas`, `llmToolBridge`
+- Config, client, providers (`createProvider`, `openaiCompatible`, `llamaCpp`, `httpChatCompletions`)
+- Chat service, controller, rate limiter, prompt guard, metrics
+- Tool registry, executor, authorization, forbidden args, schemas, llmToolBridge
 - All five business tools + `registerProductionTools`
+- Compression, message building, error mapping
 
 ### Build / lint
 
-- `npm run lint` (`tsc --noEmit`) — passes on current tree
-- `npm run build` — TypeScript compile to `dist/`
+```bash
+npm run lint    # tsc --noEmit
+npm run build   # TypeScript compile to dist/
+```
 
-Integration tests against live llama.cpp are **not** in the unit suite; local smoke tests are manual.
-
----
-
-## 12. Performance
-
-- AI runs **only** on explicit `POST /api/v1/ai/chat` — no AI on dashboard page load or CRUD
-- Normal dashboard HTTP routes and cache behavior are **unchanged**
-- Tools reuse metrics + `dashboardDataLoader` — no duplicate aggregation logic
-- Local llama.cpp latency is **high** on CPU; frontend waits up to **190s** (see frontend doc)
-- Next.js rewrite timeout issue resolved by dedicated route handler (not by changing ERP metrics)
+Integration tests against live llama.cpp are **not** in the unit suite; local smoke tests are manual (`scripts/test-groq-ai-live.mjs`).
 
 ---
 
 ## 13. Current Limitations / Deferred Work
 
-**Not implemented** (as of Phase 11):
+**Not implemented** — do not document these as current capabilities:
 
-- Conversation persistence / chat history storage
-- Streaming responses (SSE/chunked)
-- Additional business tools (mutations, CRM actions, etc.)
-- Faster inference / model hosting guidance in-repo
-- Phase 12 features
+| Feature | Status |
+| --- | --- |
+| RAG / retrieval-augmented generation | Deferred |
+| Vector database / embeddings | Deferred |
+| Hybrid retrieval / reranking | Deferred |
+| Fine-tuning / LoRA | Deferred |
+| Streaming responses (SSE/chunked) | Deferred |
+| Persistent conversation memory | Deferred |
+| Distributed Redis-backed AI rate limiting / metrics | Deferred |
+| Semantic prompt-injection defense | Deferred |
+| Provider retry policy | Deferred (could duplicate tool execution) |
+| Additional mutation/write business tools | Deferred |
+| External observability (Datadog, OpenTelemetry) | Deferred |
 
 ---
 
-## 14. Phase Status Table
+## 14. Phase Progression (6–17)
 
 | Phase | Purpose | Status | Important outcome |
-|-------|---------|--------|-------------------|
+| --- | --- | --- | --- |
 | 6 | LLM provider foundation | Complete | `LLMProvider`, fetch-based HTTP, opt-in config, timeouts |
 | 7 | Tool registry + executor | Complete | Allowlist, schema validation, RBAC, forbidden args |
 | 8 | First business tool | Complete | `getTodaySales` via metrics/cache |
@@ -407,199 +599,25 @@ Integration tests against live llama.cpp are **not** in the unit suite; local sm
 | 10 | Production read-only tools | Complete | 5 tools, metrics reuse, no mutations |
 | 11 | Frontend integration (API) | Complete | Cookie auth, `{ message }` only, long-timeout proxy path |
 | 12 | Prompt guard + rate limit | Complete | Injection patterns blocked; in-memory per-user rate limit |
-| 13 | Offline evaluation | Complete | Mocked-provider quality harness (~32 cases) |
+| 13 | Offline evaluation | Complete | Mocked-provider quality harness (32 cases) |
 | 14 | Observability | Complete | Request correlation, latency/token/tool metrics, admin snapshot |
-| 15 | Latency & token efficiency | Complete | Output token caps verified, tool-def cache, parallel read-only tools |
-| 16 | Production hardening | Complete | Reliability/security audit fixes, focused regression tests |
-| 17 | Production readiness audit | Complete | Final-answer normalization; audit confirms Phases 12–16 sufficient |
-
-**Phase 12:** Complete — prompt injection guard (`promptGuard.ts`), in-memory per-user rate limiter (`aiRateLimiter.ts`), structured request metrics foundation (`aiRequestMetrics.ts`).
-
-**Phase 13:** Complete — offline evaluation harness under `tests/evaluation/ai/` (see [AI_EVALUATION.md](./AI_EVALUATION.md)).
-
-**Phase 14:** Complete — LLM observability and process-local aggregation (see section 15 below).
-
-**Phase 15:** Complete — backend latency/token micro-optimizations without API or frontend changes (see section 16 below).
-
-**Phase 16:** Complete — production hardening and reliability audit (see section 17 below).
-
-**Phase 17:** Complete — production readiness audit on top of Phase 16 (see section 18 below).
+| 15 | Latency & token efficiency | Complete | Output token caps, tool-def cache, parallel read-only tools |
+| 16 | Production hardening | Complete | Reliability/security audit fixes, regression tests |
+| 17 | Production readiness audit | Complete | Final-answer normalization; provider content guards |
 
 ---
 
-## 15. LLM Observability & Monitoring
-
-Backend-only observability for `POST /api/v1/ai/chat`. Does not change AI behavior or the frontend contract.
-
-### What is tracked (per request)
-
-| Field | Description |
-|-------|-------------|
-| `requestId` | UUID correlating provider/tool logs for one AI request |
-| `provider` / `model` | From `AI_PROVIDER` / `AI_MODEL` |
-| `status` | `success`, `error`, `timeout`, `rate_limited`, `blocked` |
-| `errorCategory` | Safe bucket: `timeout`, `rate_limit`, `provider_error`, etc. |
-| `totalMs`, `providerMs`, `toolMs`, `overheadMs` | Latency breakdown (`overheadMs = max(0, total - provider - tool)`) |
-| `providerCallCount`, `toolCallCount`, `toolRounds` | Agent loop shape |
-| `tools[]` | Per-tool `callCount`, `totalMs`, `failureCount`, `averageMs` (no arguments) |
-| `promptTokens`, `completionTokens`, `totalTokens` | From provider usage when available; otherwise `null` |
-| `promptGuardBlocked`, `toolValidationFailures` | Security counters |
-
-Structured log event: `ai_chat_metrics` (JSON via `logAiRequestMetrics`).
-
-### Process-local aggregates
-
-`aiMetricsAggregator.ts` maintains bounded in-memory counters (resets on process restart):
-
-- Request success/failure/timeout/rate-limit/blocked counts
-- Average latency, provider latency, tool latency, tokens
-- Per-provider/model and per-tool aggregates (bounded key caps)
-
-Admin-only snapshot: `GET /api/v1/ai/metrics` (requires `role === 'admin'`). Returns aggregate counters only — no user or business data.
-
-### Intentionally NOT logged
-
-- API keys, authorization headers, cookies, JWTs
-- User prompts / AI responses
-- Tool arguments or returned business payloads
-- MongoDB documents or tenant secrets
-
-Safe even when `AI_DEBUG=true`.
-
-### Current limitation
-
-Metrics are **process-local** (no Redis/DB persistence). Suitable for dev and early production; external observability (Datadog, OpenTelemetry, etc.) can be added later when traffic justifies it.
-
----
-
-## 16. Phase 15 — Latency & Token Efficiency
-
-Backend-only optimizations. **No frontend or API contract changes.** `POST /api/v1/ai/chat` still returns `{ success, data: { message } }` after the full agent loop completes.
-
-### What changed
-
-| Area | Change |
-|------|--------|
-| Output token caps | Verified via unit tests: `createLlmProvider` sends `max_tokens: 768` (env `AI_MAX_OUTPUT_TOKENS`) for `openai_compatible` / Groq; llama.cpp stays at `512` |
-| Tool definition cache | `registeredToolsToLlmDefinitions()` caches the 5-tool schema array at module level; invalidates automatically when the registry signature changes |
-| Parallel tool execution | Independent read-only tools in the same LLM round execute via `Promise.all` after dedupe; results mapped back in original `tool_calls` order |
-| Streaming | **Deferred** — frontend awaits a complete JSON body; SSE/chunked Groq responses would require frontend work or a buffer-then-respond pattern with no perceived gain |
-
-### What did NOT change
-
-- System prompt, tool descriptions, `AI_MAX_TOOL_ROUNDS` (3), `compressToolResult` limits
-- Auth, RBAC, tenant isolation, prompt guard, rate limiter
-- Phase 14 metrics fields (`providerMs`, `toolMs`, `totalMs`, tokens, tool stats)
-
-### Benchmark script
-
-`scripts/test-groq-ai-live.mjs` prints Phase 14-style metrics per prompt: `totalMs`, `providerMs`, `toolMs`, `providerCallCount`, `toolCallCount`, `toolRounds`, `totalTokens`.
-
-### Honest impact expectations
-
-For the common case (one tool call per request), **MongoDB/metrics latency dominates** `toolMs`. Parallel execution only helps when the model emits 2+ distinct tools in one round (uncommon with Groq `gpt-oss-20b`). Tool-definition caching saves microseconds per request.
-
----
-
-## 17. Phase 16 — Production Hardening
-
-Backend-only reliability and security audit. **No frontend or API contract changes.**
-
-### What was hardened
-
-| Area | Fix |
-|------|-----|
-| Tool follow-up rounds | Tool messages now use the current LLM `tool_calls[i].id` (not cached executor ID) so Groq follow-up rounds stay correlated |
-| Dedupe cache keys | JSON args normalized before cache lookup — avoids duplicate DB work for whitespace/key-order variants |
-| Forbidden tool args | Nested arrays traversed; `tenant_id` / `user_id` snake_case variants blocked |
-| Provider malformed 200 | Non-JSON body, missing `choices`, or all-invalid `tool_calls` → `LlmProviderError` (502 to client) instead of silent empty responses |
-| GPT-OSS reasoning | Preserved — only used when content is blank **and** there are no tool calls |
-| Server error logs | Controller catch block sanitizes messages (Bearer tokens, `sk-*` keys) before logging |
-| Tool-round 429 | Maps to the same friendly busy message as user rate limit |
-| Rate limiter memory | Expired idle window entries removed from the in-memory map on next access |
-| Metrics `finally` | Wrapped in try/catch so metrics emission failures cannot mask request errors |
-
-### What was intentionally NOT changed
-
-- Frontend, API contract, streaming (still deferred)
-- Redis, RAG, vector DB, queues — not introduced
-- Groq / `openai_compatible` provider architecture
-- Token limits (768 / 512), `AI_MAX_TOOL_ROUNDS` (3), timeouts
-- In-memory rate limiter design (process-local; resets on restart)
-- Prompt guard regex set (known limitation: pattern-only, not semantic)
-- Phase 14 metrics shape and admin snapshot endpoint
-
-### Current limitations (unchanged)
-
-- Rate limiter and metrics are **process-local** — not shared across replicas; counters reset on restart
-- Prompt guard is regex-based — sophisticated obfuscation may bypass it
-- Groq (`openai_compatible` + `openai/gpt-oss-20b`) remains the recommended production provider when `AI_ENABLED=true`
-
-### Testing performed
-
-`npm run lint`, `npm run build`, `npx vitest run tests/unit/ai/`, `npm run test:ai-eval`
-
----
-
-## 18. Phase 17 — Production Readiness Audit
-
-Audit-first pass on top of Phase 16. **No frontend or API contract changes.**
-
-### What changed
-
-| Area | Change |
-|------|--------|
-| Provider text normalization | `httpChatCompletions.ts` treats non-string `content` / `reasoning` as empty — prevents `[object Object]` reaching the client |
-| Final-answer guard | `aiChatService.ts` rejects whitespace-only and `[object Object]` before the empty-response fallback |
-
-### Audit conclusion (already correct — no code change)
-
-- Full request lifecycle: rate limit and prompt guard before provider; metrics in `finally` on all paths
-- Timeout/abort: `AbortController` + `LlmTimeoutError`; no hang after timeout
-- **Retries:** intentionally none — retries could duplicate tool execution; deferred
-- Tool safety: server-side context, RBAC, forbidden args (including arrays), safe error messages
-- Context efficiency: system prompt once per call; empty messages filtered; no conversation persistence
-- Tool result compression: trend rollup + `AI_MAX_TOOL_RESULT_CHARS` + `truncated: true`
-- Cost controls unchanged: 768 output tokens, 3 tool rounds, 30 req/min, 8000 tool-result chars
-- `.env.example` documents all AI variables including `AI_TIMEOUT_MS=60000` for Groq
-
-### Cost / reliability / security impact
-
-- **Cost:** no limit increases; no extra provider or tool rounds
-- **Reliability:** eliminates malformed non-string provider content leaking to users
-- **Security:** Phase 16 boundaries unchanged (auth, RBAC, tenant isolation, sanitized logs)
-
-### Intentionally deferred
-
-- Redis (rate limit / metrics persistence)
-- Vector DB / RAG / embeddings
-- Streaming responses
-- Persistent conversation memory
-- Provider retry policy
-
-### Production configuration (recommended)
-
-- `AI_PROVIDER=openai_compatible`
-- `AI_BASE_URL=https://api.groq.com/openai/v1`
-- `AI_MODEL=openai/gpt-oss-20b`
-- `AI_TIMEOUT_MS=60000`
-
-### Testing performed
-
-`npm run lint`, `npm run build`, `npx vitest run tests/unit/ai/`, `npm run test:ai-eval`
-
----
-
-## For Future Developers
+## 15. For Future Developers
 
 1. **Enable AI:** Set `AI_ENABLED=true` and provider vars in `.env`; restart backend so `getLlmProvider()` reloads config.
 2. **Add a read-only tool:** Define in `src/ai/tools/business/`, add to `PRODUCTION_TOOLS`, reuse a metrics service, set `requiredSections`, add unit tests under `tests/unit/ai/tools/business/`.
 3. **Never** accept `tenantId` from the LLM or request body for tool execution.
 4. **Qwen + llama.cpp:** Keep `enable_thinking: false` unless you validate tool calling without it.
-5. **Long requests:** Frontend must use the dedicated Next.js AI route handler — not rely on the 30s rewrite proxy for `/ai/chat`.
+5. **Long requests:** Frontend must use the dedicated Next.js AI route handler — not rely on the 30s generic proxy for `/ai/chat`.
 6. **After `.env` changes:** Restart backend; provider singleton caches first-loaded config.
-7. **Phase 13 evaluation:** See [AI_EVALUATION.md](./AI_EVALUATION.md) for offline AI quality testing.
+7. **Evaluation:** See [AI_EVALUATION.md](./AI_EVALUATION.md) for offline AI quality testing.
+8. **Redis:** ERP Redis is for GET caching only; AI rate limit/metrics remain process-local until explicitly implemented.
 
 ---
 
-*Last aligned with codebase: Phases 6–17 complete. Configuration defaults from `src/ai/config/aiConfig.ts` and `.env.example`.*
+*Last aligned with codebase: Phases 6–17 complete. Configuration defaults from `src/ai/config/aiConfig.ts`, `src/ai/chat/aiChatLimits.ts`, and `.env.example`.*
