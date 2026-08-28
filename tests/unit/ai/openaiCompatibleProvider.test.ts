@@ -2,6 +2,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createOpenAiCompatibleProvider } from '../../../src/ai/providers/openaiCompatibleProvider.js';
 import { LlmProviderError, LlmTimeoutError } from '../../../src/ai/errors.js';
 
+const groqRuntime = {
+  providerId: 'openai_compatible' as const,
+  baseUrl: 'https://api.groq.com/openai/v1',
+  apiKey: 'groq-test-key',
+  model: 'openai/gpt-oss-20b',
+  timeoutMs: 60_000,
+  debug: false,
+  supportsTools: true,
+};
+
 const runtime = {
   providerId: 'openai_compatible' as const,
   baseUrl: 'https://api.example.com/v1',
@@ -147,6 +157,65 @@ describe('openaiCompatibleProvider', () => {
         tool_call_id: 'call_1',
       },
     ]);
+  });
+
+  it('posts to Groq without llama-specific request fields', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        choices: [{
+          finish_reason: 'tool_calls',
+          message: {
+            content: '',
+            tool_calls: [{
+              id: 'call_groq_1',
+              type: 'function',
+              function: { name: 'getTodaySales', arguments: '{}' },
+            }],
+          },
+        }],
+      }),
+    }));
+
+    const provider = createOpenAiCompatibleProvider(groqRuntime);
+    await provider.generateWithTools({
+      messages: [{ role: 'user', content: 'আজকের sales কত?' }],
+      tools: [{
+        type: 'function',
+        function: { name: 'getTodaySales', description: 'Today sales' },
+      }],
+      toolChoice: 'auto',
+    });
+
+    const fetchMock = vi.mocked(fetch);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(String(fetchMock.mock.calls[0]![0])).toBe('https://api.groq.com/openai/v1/chat/completions');
+    const body = JSON.parse(String(fetchMock.mock.calls[0]![1]?.body));
+    expect(body.model).toBe('openai/gpt-oss-20b');
+    expect(body.chat_template_kwargs).toBeUndefined();
+    expect(body.max_tokens).toBeUndefined();
+    expect(body.tool_choice).toBe('auto');
+  });
+
+  it('uses message.reasoning as content fallback when content is empty and no tool calls', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        choices: [{
+          finish_reason: 'stop',
+          message: { content: '', reasoning: 'Today sales total is 12,500 BDT.' },
+        }],
+      }),
+    }));
+
+    const provider = createOpenAiCompatibleProvider(groqRuntime);
+    const result = await provider.generate({
+      messages: [{ role: 'user', content: 'Sales today?' }],
+    });
+
+    expect(result.content).toBe('Today sales total is 12,500 BDT.');
   });
 
   it('maps HTTP errors to LlmProviderError', async () => {

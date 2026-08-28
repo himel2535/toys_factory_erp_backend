@@ -30,6 +30,30 @@ describe('loadAiConfig', () => {
     });
   });
 
+  it('loads Groq openai_compatible config when enabled', () => {
+    const config = loadAiConfig({
+      AI_ENABLED: 'true',
+      AI_PROVIDER: 'openai_compatible',
+      AI_BASE_URL: 'https://api.groq.com/openai/v1',
+      AI_API_KEY: 'groq-test-key',
+      AI_MODEL: 'openai/gpt-oss-20b',
+      AI_TIMEOUT_MS: '60000',
+      AI_ALLOW_MISSING_KEY: 'false',
+      AI_DEBUG: 'false',
+    });
+
+    expect(config).toEqual({
+      enabled: true,
+      provider: 'openai_compatible',
+      baseUrl: 'https://api.groq.com/openai/v1',
+      apiKey: 'groq-test-key',
+      model: 'openai/gpt-oss-20b',
+      timeoutMs: 60000,
+      allowMissingKey: false,
+      debug: false,
+    });
+  });
+
   it('applies llama_cpp defaults for base URL and model', () => {
     const config = loadAiConfig({
       AI_ENABLED: 'true',

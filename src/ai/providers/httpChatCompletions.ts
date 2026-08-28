@@ -42,6 +42,7 @@ type RawChatCompletionResponse = {
     finish_reason?: string;
     message?: {
       content?: string | null;
+      reasoning?: string | null;
       tool_calls?: RawToolCall[];
     };
   }>;
@@ -180,8 +181,13 @@ export async function postChatCompletions(
     }
 
     const choice = payload?.choices?.[0];
-    const content = String(choice?.message?.content ?? '');
-    const toolCalls = normalizeToolCalls(choice?.message?.tool_calls);
+    const message = choice?.message;
+    const toolCalls = normalizeToolCalls(message?.tool_calls);
+    let content = String(message?.content ?? '');
+    if (!content.trim() && !toolCalls.length) {
+      const reasoning = String(message?.reasoning ?? '').trim();
+      if (reasoning) content = reasoning;
+    }
 
     const result: LlmGenerateWithToolsResult = {
       content,
