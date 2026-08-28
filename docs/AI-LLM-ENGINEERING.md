@@ -419,6 +419,7 @@ Integration tests against live llama.cpp are **not** in the unit suite; local sm
 4. **Qwen + llama.cpp:** Keep `enable_thinking: false` unless you validate tool calling without it.
 5. **Long requests:** Frontend must use the dedicated Next.js AI route handler — not rely on the 30s rewrite proxy for `/ai/chat`.
 6. **After `.env` changes:** Restart backend; provider singleton caches first-loaded config.
+7. **Phase 13 evaluation:** See [AI_EVALUATION.md](./AI_EVALUATION.md) for offline AI quality testing.
 
 ---
 
